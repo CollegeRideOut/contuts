@@ -1,4 +1,6 @@
-# contuts — Human-centric AI code agent for Neovim
+# contuts — Human-centric AI code agent
+
+**Currently Neovim-only. More editors coming soon.**
 
 **Plan → Build → Review → Merge**
 
