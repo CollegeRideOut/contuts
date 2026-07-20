@@ -159,18 +159,51 @@ vim.api.nvim_create_user_command('ContutsReview', function()
     return
   end
 
-  vim.cmd('tabedit ' .. vim.fn.fnameescape(files[1]))
-  vim.cmd('Gvdiffsplit ' .. base .. '...' .. build.branch)
+  vim.cmd('tabedit')
+  local diff_left = vim.api.nvim_get_current_win()
+  vim.cmd('0Gedit ' .. base .. ':' .. files[1])
+  vim.cmd('diffthis')
+  vim.cmd('vertical rightbelow new')
+  local diff_right = vim.api.nvim_get_current_win()
+  vim.cmd('0Gedit ' .. build.branch .. ':' .. files[1])
+  vim.cmd('diffthis')
+  vim.wo[diff_left].scrollbind = true
+  vim.wo[diff_right].scrollbind = true
+  vim.api.nvim_set_current_win(diff_left)
 
+  local items = {}
+  for _, f in ipairs(files) do
+    items[#items + 1] = { filename = vim.fn.fnamemodify(f, ':.'), text = f }
+  end
   vim.fn.setqflist({}, 'r', {
     title = 'Contuts Review: ' .. build.branch,
-    items = vim.tbl_map(function(f)
-      local fn = vim.fn.fnamemodify(f, ':t')
-      return { filename = f, text = fn .. ' (' .. base .. '...' .. build.branch .. ')' }
-    end, files),
+    items = items,
   })
+
   vim.cmd('copen')
   vim.cmd('wincmd L')
+
+  vim.api.nvim_buf_set_keymap(vim.fn.bufnr('%'), 'n', '<CR>', '', {
+    noremap = true, silent = true,
+    callback = function()
+      local qf = vim.fn.getqflist({ items = 1, idx = 1 })
+      local entry = qf.items and qf.items[qf.idx]
+      if not entry or not entry.filename then return end
+
+      if vim.api.nvim_win_is_valid(diff_left) and vim.api.nvim_win_is_valid(diff_right) then
+        vim.api.nvim_set_current_win(diff_left)
+        vim.cmd('0Gedit ' .. base .. ':' .. entry.filename)
+        vim.cmd('diffthis')
+        vim.api.nvim_set_current_win(diff_right)
+        vim.cmd('0Gedit ' .. build.branch .. ':' .. entry.filename)
+        vim.cmd('diffthis')
+        vim.cmd('diffupdate')
+        vim.api.nvim_set_current_win(diff_left)
+      end
+    end,
+  })
+
+  vim.cmd('wincmd =')
 end, { desc = 'Review the last build result side by side' })
 
 vim.api.nvim_create_user_command('ContutsMerge', function()
