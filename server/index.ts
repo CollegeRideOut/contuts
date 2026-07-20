@@ -1,6 +1,7 @@
 import * as net from 'net'
 import { spawn, execSync, spawnSync } from 'child_process'
 import * as path from 'path'
+
 interface Message {
   type: string
   content?: string
@@ -12,8 +13,6 @@ interface ReadyMessage {
   ready: true
   port: number
 }
-
-console.log("hello world")
 
 interface BuildResult {
   type: 'build_result'
@@ -28,11 +27,11 @@ interface BuildResult {
 }
 
 const repoPath = process.cwd()
-let buildTaskId: string | null = null
-let buildWorktreePath: string | null = null
-let buildBranch: string | null = null
+let worktreePath: string | null = null
+let worktreeBranch: string | null = null
 let isBuilding = false
 let chatSessionID: string | null = null
+let buildTaskId: string | null = null
 let defaultBranch: string | null = null
 
 function detectDefaultBranch(cwd: string): string {
@@ -48,7 +47,32 @@ function detectDefaultBranch(cwd: string): string {
   return defaultBranch
 }
 
-let chmodNeedsRestore = false
+function ensureWorktree(cwd: string): void {
+  if (worktreePath) return
+  const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
+  worktreeBranch = `agent/contuts-${id}`
+  worktreePath = path.join(path.dirname(cwd), `contuts-${id}`)
+
+  try {
+    execSync('git rev-parse HEAD', { cwd, stdio: 'pipe' })
+  } catch {
+    execSync('git commit --allow-empty -m "contuts: root"', { cwd, stdio: 'pipe' })
+  }
+
+  execSync(`git worktree add -b ${worktreeBranch} ${worktreePath} HEAD`, { cwd, stdio: 'pipe' })
+}
+
+function cleanupWorktree(): void {
+  if (!worktreePath || !worktreeBranch) return
+  try {
+    execSync(`git worktree remove ${worktreePath}`, { cwd: repoPath, stdio: 'pipe' })
+  } catch {}
+  try {
+    execSync(`git branch -D ${worktreeBranch}`, { cwd: repoPath, stdio: 'pipe' })
+  } catch {}
+  worktreePath = null
+  worktreeBranch = null
+}
 
 function chmodRepo(cwd: string, readonly: boolean): void {
   const mode = readonly ? 'a-w' : 'u+w'
@@ -56,20 +80,7 @@ function chmodRepo(cwd: string, readonly: boolean): void {
     `find ${cwd} -path '${cwd}/.git' -prune -o -type f -exec chmod ${mode} {} +`,
     { stdio: 'pipe' }
   )
-  chmodNeedsRestore = readonly
 }
-
-function cleanupPerms(): void {
-  if (chmodNeedsRestore) {
-    spawnSync('find', [repoPath, '-path', `${repoPath}/.git`, '-prune', '-o', '-type', 'f', '-exec', 'chmod', 'u+w', '{}', '+'])
-    chmodNeedsRestore = false
-  }
-}
-
-process.on('exit', cleanupPerms)
-process.on('SIGINT', () => { cleanupPerms(); process.exit(2) })
-process.on('SIGTERM', () => { cleanupPerms(); process.exit(15) })
-process.on('uncaughtException', () => { cleanupPerms(); process.exit(1) })
 
 function sendMessage(socket: net.Socket, msg: Message): void {
   socket.write(JSON.stringify(msg) + '\n')
@@ -79,126 +90,17 @@ function generateTaskId(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
 }
 
-function handleBuild(socket: net.Socket, content: string, buildRepoPath?: string): void {
-  const cwd = buildRepoPath || repoPath
-  if (isBuilding) {
-    sendMessage(socket, { type: 'error', content: 'Build already in progress' })
-    return
-  }
-
-  isBuilding = true
-  const id = generateTaskId()
-  buildTaskId = id
-  buildBranch = `agent/contuts-${id}`
-  buildWorktreePath = path.join(path.dirname(cwd), `contuts-wt-${id}`)
-  sendMessage(socket, { type: 'mode_change', mode: 'build' })
-
-  const baseBranch = detectDefaultBranch(cwd)
-
-  try {
-    execSync('git rev-parse HEAD', { cwd, stdio: 'pipe' })
-  } catch {
-    sendMessage(socket, { type: 'build_status', content: 'No commits yet, creating initial commit...' })
-    execSync('git commit --allow-empty -m "contuts: root"', { cwd, stdio: 'pipe' })
-  }
-
-  sendMessage(socket, { type: 'build_status', content: `Creating worktree at ${buildWorktreePath}...` })
-
-  try {
-    execSync(`git worktree add -b ${buildBranch} ${buildWorktreePath} HEAD`, { cwd: cwd, stdio: 'pipe' })
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e)
-    sendMessage(socket, { type: 'error', content: `Worktree creation failed: ${msg}` })
-    sendMessage(socket, { type: 'mode_change', mode: 'plan' })
-    isBuilding = false
-    return
-  }
-
-  sendMessage(socket, { type: 'build_status', content: `Branch: ${buildBranch}` })
-  sendMessage(socket, { type: 'build_status', content: 'Running opencode...' })
-
-  const buildPrompt = `[SYSTEM: BUILD MODE] You are in build mode. You have full write permissions in the worktree.\n\n${content}`
-  const buildArgs = ['run', '--format', 'json', '--auto']
-  if (chatSessionID) {
-    buildArgs.push('--session', chatSessionID)
-  }
-  buildArgs.push(buildPrompt)
-
-  const proc = spawn('opencode', buildArgs, {
-    cwd: buildWorktreePath,
-    env: { ...process.env },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
-
-  const STALE_TIMEOUT = 5 * 60 * 1000
-  const timer = setTimeout(() => {
-    proc.kill('SIGTERM')
-    sendMessage(socket, { type: 'error', content: 'Build timed out after 5 minutes' })
-    sendMessage(socket, { type: 'mode_change', mode: 'plan' })
-    isBuilding = false
-  }, STALE_TIMEOUT)
-
-  let stderrBuf = ''
-
-  proc.stdout.on('data', (chunk: Buffer) => {
-    const output = chunk.toString()
-    for (const line of output.split('\n').filter(l => l.trim())) {
-      try {
-        const event = JSON.parse(line)
-        if (event.type === 'text' && event.part?.text) {
-          sendMessage(socket, { type: 'build_status', content: event.part.text })
-        }
-        if (event.type === 'tool_use' && event.part?.tool) {
-          const tool = event.part
-          const title = tool.title ? ` ${tool.title}` : ''
-          const status = tool.state?.status === 'completed' ? '✓' : '⋯'
-          sendMessage(socket, { type: 'build_status', content: `  ${status} [${tool.tool}]${title}` })
-        }
-      } catch {
-        // skip non-JSON lines
-      }
-    }
-  })
-
-  proc.stderr.on('data', (chunk: Buffer) => {
-    stderrBuf += chunk.toString()
-  })
-
-  proc.on('close', () => {
-    clearTimeout(timer)
-    if (stderrBuf.trim()) {
-      sendMessage(socket, { type: 'build_status', content: `stderr: ${stderrBuf.trim()}` })
-    }
-    sendMessage(socket, { type: 'build_status', content: 'Committing changes...' })
-    try {
-      execSync('git add -A', { cwd: buildWorktreePath!, stdio: 'pipe' })
-      execSync('git commit -m "contuts: build task"', { cwd: buildWorktreePath!, stdio: 'pipe' })
-      sendMessage(socket, { type: 'build_status', content: 'Changes committed.' })
-    } catch {
-      sendMessage(socket, { type: 'build_status', content: 'Nothing to commit (no changes made).' })
-    }
-    collectBuildResult(socket, cwd, baseBranch)
-  })
-
-  proc.on('error', (err) => {
-    clearTimeout(timer)
-    sendMessage(socket, { type: 'error', content: `opencode failed: ${err.message}` })
-    sendMessage(socket, { type: 'mode_change', mode: 'plan' })
-    isBuilding = false
-  })
-}
-
 function collectBuildResult(socket: net.Socket, cwd?: string, baseBranch?: string): void {
   const repo = cwd || repoPath
   const base = baseBranch || detectDefaultBranch(repo)
-  if (!buildBranch || !buildTaskId) {
+  if (!worktreeBranch || !buildTaskId) {
     sendMessage(socket, { type: 'error', content: 'No build to collect results from' })
     isBuilding = false
     return
   }
 
   try {
-    const branch = buildBranch
+    const branch = worktreeBranch
 
     const diffStat = execSync(`git diff ${base}...${branch} --stat`, { cwd: repo, encoding: 'utf-8' }).trim()
     const numstat = execSync(`git diff ${base}...${branch} --numstat`, { cwd: repo, encoding: 'utf-8' }).trim()
@@ -240,29 +142,171 @@ function collectBuildResult(socket: net.Socket, cwd?: string, baseBranch?: strin
   isBuilding = false
 }
 
+function handlePrompt(socket: net.Socket, content: string): void {
+  const cwd = repoPath
+  ensureWorktree(cwd)
+
+  execSync('git checkout -f HEAD', { cwd: worktreePath!, stdio: 'pipe' })
+  chmodRepo(worktreePath!, true)
+
+  const prompt = `[SYSTEM: PLAN MODE] You are in plan mode. You may read files for context, but you MUST NOT create, edit, or delete any files. Only discuss and analyze.\n\n${content}`
+
+  const proc = spawn('opencode', ['run', '--format', 'json', prompt], {
+    cwd: worktreePath!,
+    env: { ...process.env },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+
+  let responseText = ''
+  let stdoutBuf = ''
+
+  proc.stdout.on('data', (chunk: Buffer) => {
+    stdoutBuf += chunk.toString()
+    const lines = stdoutBuf.split('\n')
+    stdoutBuf = lines.pop() ?? ''
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      try {
+        const event = JSON.parse(trimmed)
+        if (event.sessionID && !chatSessionID) {
+          chatSessionID = event.sessionID
+        }
+        if (event.type === 'text' && event.part?.text) {
+          responseText += event.part.text
+        }
+      } catch {}
+    }
+  })
+
+  proc.on('close', () => {
+    chmodRepo(worktreePath!, false)
+    sendMessage(socket, { type: 'response', content: responseText })
+  })
+
+  proc.on('error', () => {
+    chmodRepo(worktreePath!, false)
+    sendMessage(socket, { type: 'error', content: 'Failed to run opencode' })
+  })
+}
+
+function handleBuild(socket: net.Socket, content: string, buildRepoPath?: string): void {
+  const cwd = buildRepoPath || repoPath
+  if (isBuilding) {
+    sendMessage(socket, { type: 'error', content: 'Build already in progress' })
+    return
+  }
+
+  isBuilding = true
+  buildTaskId = generateTaskId()
+  ensureWorktree(cwd)
+
+  const baseBranch = detectDefaultBranch(cwd)
+
+  sendMessage(socket, { type: 'mode_change', mode: 'build' })
+  sendMessage(socket, { type: 'build_status', content: `Branch: ${worktreeBranch}` })
+  sendMessage(socket, { type: 'build_status', content: 'Running opencode...' })
+
+  chmodRepo(worktreePath!, false)
+
+  const buildPrompt = `[SYSTEM: BUILD MODE] You are in build mode. You have full write permissions in the worktree.\n\n${content}`
+  const buildArgs = ['run', '--format', 'json', '--auto']
+  if (chatSessionID) {
+    buildArgs.push('--session', chatSessionID)
+  }
+  buildArgs.push(buildPrompt)
+
+  const proc = spawn('opencode', buildArgs, {
+    cwd: worktreePath!,
+    env: { ...process.env },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+
+  const STALE_TIMEOUT = 5 * 60 * 1000
+  const timer = setTimeout(() => {
+    proc.kill('SIGTERM')
+    sendMessage(socket, { type: 'error', content: 'Build timed out after 5 minutes' })
+    sendMessage(socket, { type: 'mode_change', mode: 'plan' })
+    isBuilding = false
+  }, STALE_TIMEOUT)
+
+  let stderrBuf = ''
+  let stdoutBuf = ''
+  let lastActivity = Date.now()
+
+  const heartbeat = setInterval(() => {
+    if (Date.now() - lastActivity > 4000) {
+      sendMessage(socket, { type: 'build_status', content: '  ● working...' })
+    }
+  }, 5000)
+
+  proc.stdout.on('data', (chunk: Buffer) => {
+    lastActivity = Date.now()
+    stdoutBuf += chunk.toString()
+    const lines = stdoutBuf.split('\n')
+    stdoutBuf = lines.pop() ?? ''
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      try {
+        const event = JSON.parse(trimmed)
+        if (event.type === 'text' && event.part?.text) {
+          sendMessage(socket, { type: 'build_status', content: event.part.text })
+        }
+        if (event.type === 'tool_use' && event.part?.tool) {
+          const tool = event.part
+          const title = tool.title ? ` ${tool.title}` : ''
+          const status = tool.state?.status === 'completed' ? '✓' : '⋯'
+          sendMessage(socket, { type: 'build_status', content: `  ${status} [${tool.tool}]${title}` })
+        }
+      } catch {}
+    }
+  })
+
+  proc.stderr.on('data', (chunk: Buffer) => {
+    stderrBuf += chunk.toString()
+  })
+
+  proc.on('close', () => {
+    clearTimeout(timer)
+    clearInterval(heartbeat)
+    if (stderrBuf.trim()) {
+      sendMessage(socket, { type: 'build_status', content: `stderr: ${stderrBuf.trim()}` })
+    }
+    sendMessage(socket, { type: 'build_status', content: 'Committing changes...' })
+    try {
+      execSync('git add -A', { cwd: worktreePath!, stdio: 'pipe' })
+      execSync('git commit -m "contuts: build task"', { cwd: worktreePath!, stdio: 'pipe' })
+      sendMessage(socket, { type: 'build_status', content: 'Changes committed.' })
+    } catch {
+      sendMessage(socket, { type: 'build_status', content: 'Nothing to commit (no changes made).' })
+    }
+    collectBuildResult(socket, cwd, baseBranch)
+  })
+
+  proc.on('error', (err) => {
+    clearTimeout(timer)
+    clearInterval(heartbeat)
+    sendMessage(socket, { type: 'error', content: `opencode failed: ${err.message}` })
+    sendMessage(socket, { type: 'mode_change', mode: 'plan' })
+    isBuilding = false
+  })
+}
+
 function handleMerge(socket: net.Socket): void {
-  if (!buildBranch || !buildWorktreePath) {
+  if (!worktreeBranch || !worktreePath) {
     sendMessage(socket, { type: 'error', content: 'No build to merge' })
     return
   }
 
   try {
-    const branch = buildBranch
-    const wtPath = buildWorktreePath
-
+    const branch = worktreeBranch
     execSync(`git merge --squash ${branch}`, { cwd: repoPath, stdio: 'pipe' })
     execSync(`git commit -m "contuts: merge ${branch}"`, { cwd: repoPath, stdio: 'pipe' })
 
-    // Clean up
-    execSync(`git worktree remove ${wtPath}`, { cwd: repoPath, stdio: 'pipe' })
+    cleanupWorktree()
     const base = detectDefaultBranch(repoPath)
-    execSync(`git branch -D ${branch}`, { cwd: repoPath, stdio: 'pipe' })
-
     sendMessage(socket, { type: 'build_status', content: `Merged ${branch} into ${base}` })
-
-    buildBranch = null
-    buildWorktreePath = null
-    buildTaskId = null
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e)
     sendMessage(socket, { type: 'error', content: `Merge failed: ${msg}` })
@@ -270,69 +314,19 @@ function handleMerge(socket: net.Socket): void {
 }
 
 function handleDiscard(socket: net.Socket): void {
-  if (!buildBranch || !buildWorktreePath) {
+  if (!worktreeBranch || !worktreePath) {
     sendMessage(socket, { type: 'error', content: 'No build to discard' })
     return
   }
 
   try {
-    const branch = buildBranch
-    const wtPath = buildWorktreePath
-
-    execSync(`git worktree remove ${wtPath}`, { cwd: repoPath, stdio: 'pipe' })
-    execSync(`git branch -D ${branch}`, { cwd: repoPath, stdio: 'pipe' })
-
+    const branch = worktreeBranch
     sendMessage(socket, { type: 'build_status', content: `Discarded ${branch} and cleaned up worktree` })
-
-    buildBranch = null
-    buildWorktreePath = null
-    buildTaskId = null
+    cleanupWorktree()
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e)
     sendMessage(socket, { type: 'error', content: `Discard failed: ${msg}` })
   }
-}
-
-function handlePrompt(socket: net.Socket, content: string): void {
-  const cwd = repoPath
-  chmodRepo(cwd, true)
-
-  const prompt = `[SYSTEM: PLAN MODE] You are in plan mode. You may read files for context, but you MUST NOT create, edit, or delete any files. Only discuss and analyze.\n\n${content}`
-
-  const proc = spawn('opencode', ['run', '--format', 'json', prompt], {
-    cwd,
-    env: { ...process.env },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
-
-  let responseText = ''
-
-  proc.stdout.on('data', (chunk: Buffer) => {
-    const output = chunk.toString()
-    for (const line of output.split('\n').filter(l => l.trim())) {
-      try {
-        const event = JSON.parse(line)
-        if (event.sessionID && !chatSessionID) {
-          chatSessionID = event.sessionID
-        }
-        if (event.type === 'text' && event.part?.text) {
-          responseText += event.part.text
-        }
-      } catch {
-        // skip
-      }
-    }
-  })
-
-  proc.on('close', () => {
-    chmodRepo(cwd, false)
-    sendMessage(socket, { type: 'response', content: responseText })
-  })
-
-  proc.on('error', () => {
-    chmodRepo(cwd, false)
-    sendMessage(socket, { type: 'error', content: 'Failed to run opencode' })
-  })
 }
 
 function handleMessage(socket: net.Socket, msg: Message): void {
@@ -350,12 +344,20 @@ function handleMessage(socket: net.Socket, msg: Message): void {
       handleDiscard(socket)
       break
     case 'shutdown':
+      cleanupWorktree()
       socket.end()
       break
     default:
       sendMessage(socket, { type: 'error', content: `Unknown type: ${msg.type}` })
   }
 }
+
+process.on('exit', () => {
+  cleanupWorktree()
+})
+process.on('SIGINT', () => { cleanupWorktree(); process.exit(2) })
+process.on('SIGTERM', () => { cleanupWorktree(); process.exit(15) })
+process.on('uncaughtException', () => { cleanupWorktree(); process.exit(1) })
 
 const server = net.createServer((socket: net.Socket) => {
   let buffer = ''
@@ -376,8 +378,8 @@ const server = net.createServer((socket: net.Socket) => {
     }
   })
 
-  socket.on('close', () => { })
-  socket.on('error', () => { })
+  socket.on('close', () => {})
+  socket.on('error', () => {})
 })
 
 server.listen(0, '127.0.0.1', () => {
