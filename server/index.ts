@@ -310,12 +310,19 @@ function handleMerge(socket: net.Socket): void {
   try {
     const branch = worktreeBranch
 
-    execSync('git stash', { cwd: repoPath, stdio: 'pipe' })
+    let stashed = false
+    try {
+      execSync('git stash', { cwd: repoPath, stdio: 'pipe' })
+      stashed = true
+    } catch { }
+
     try {
       execSync(`git merge --squash ${branch}`, { cwd: repoPath, stdio: 'pipe' })
       execSync(`git commit -m "contuts: merge ${branch}"`, { cwd: repoPath, stdio: 'pipe' })
     } finally {
-      execSync('git stash pop', { cwd: repoPath, stdio: 'pipe' })
+      if (stashed) {
+        execSync('git stash pop', { cwd: repoPath, stdio: 'pipe' })
+      }
     }
 
     cleanupWorktree()
