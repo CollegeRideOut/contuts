@@ -4,6 +4,15 @@ local buf = nil
 local win = nil
 local pending = false
 local width = 0
+local current_mode = 'plan'
+
+local function set_title(mode)
+  current_mode = mode
+  if win and vim.api.nvim_win_is_valid(win) then
+    local label = mode == 'build' and 'BUILD MODE' or 'PLAN MODE'
+    vim.api.nvim_win_set_config(win, { title = ' Contuts Chat [' .. label .. '] ' })
+  end
+end
 
 function M.open()
   if buf and vim.api.nvim_buf_is_valid(buf) then
@@ -27,7 +36,7 @@ function M.open()
     col = col,
     style = 'minimal',
     border = 'rounded',
-    title = ' Contuts Chat ',
+    title = ' Contuts Chat [PLAN MODE] ',
   })
 
   vim.wo[win].wrap = true
@@ -42,6 +51,14 @@ function M.open()
   })
 
   require('contuts').set_notification_handler(function(msg)
+    if msg.type == 'mode_change' then
+      vim.schedule(function()
+        pcall(function()
+          set_title(msg.mode)
+        end)
+      end)
+      return
+    end
     if buf and vim.api.nvim_buf_is_valid(buf) then
       vim.schedule(function()
         pcall(function()

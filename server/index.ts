@@ -1,10 +1,11 @@
 import * as net from 'net'
-import { spawn, execSync } from 'child_process'
+import { spawn, execSync, spawnSync } from 'child_process'
 import * as path from 'path'
 interface Message {
   type: string
   content?: string
   repoPath?: string
+  mode?: string
 }
 
 interface ReadyMessage {
@@ -12,10 +13,13 @@ interface ReadyMessage {
   port: number
 }
 
+console.log("hello world")
+
 interface BuildResult {
   type: 'build_result'
   taskId: string
   branch: string
+  baseBranch: string
   files: string[]
   insertions: number
   deletions: number
@@ -23,14 +27,49 @@ interface BuildResult {
   diffStat: string
 }
 
-console.log("hello world testing contuts chat")
-
 const repoPath = process.cwd()
 let buildTaskId: string | null = null
 let buildWorktreePath: string | null = null
 let buildBranch: string | null = null
 let isBuilding = false
 let chatSessionID: string | null = null
+let defaultBranch: string | null = null
+
+function detectDefaultBranch(cwd: string): string {
+  if (defaultBranch) return defaultBranch
+  try {
+    defaultBranch = execSync(
+      `git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null || git rev-parse --abbrev-ref HEAD`,
+      { cwd, encoding: 'utf-8' }
+    ).trim().replace('refs/remotes/origin/', '')
+  } catch {
+    defaultBranch = 'main'
+  }
+  return defaultBranch
+}
+
+let chmodNeedsRestore = false
+
+function chmodRepo(cwd: string, readonly: boolean): void {
+  const mode = readonly ? 'a-w' : 'u+w'
+  execSync(
+    `find ${cwd} -path '${cwd}/.git' -prune -o -type f -exec chmod ${mode} {} +`,
+    { stdio: 'pipe' }
+  )
+  chmodNeedsRestore = readonly
+}
+
+function cleanupPerms(): void {
+  if (chmodNeedsRestore) {
+    spawnSync('find', [repoPath, '-path', `${repoPath}/.git`, '-prune', '-o', '-type', 'f', '-exec', 'chmod', 'u+w', '{}', '+'])
+    chmodNeedsRestore = false
+  }
+}
+
+process.on('exit', cleanupPerms)
+process.on('SIGINT', () => { cleanupPerms(); process.exit(2) })
+process.on('SIGTERM', () => { cleanupPerms(); process.exit(15) })
+process.on('uncaughtException', () => { cleanupPerms(); process.exit(1) })
 
 function sendMessage(socket: net.Socket, msg: Message): void {
   socket.write(JSON.stringify(msg) + '\n')
@@ -52,6 +91,16 @@ function handleBuild(socket: net.Socket, content: string, buildRepoPath?: string
   buildTaskId = id
   buildBranch = `agent/contuts-${id}`
   buildWorktreePath = path.join(path.dirname(cwd), `contuts-wt-${id}`)
+  sendMessage(socket, { type: 'mode_change', mode: 'build' })
+
+  const baseBranch = detectDefaultBranch(cwd)
+
+  try {
+    execSync('git rev-parse HEAD', { cwd, stdio: 'pipe' })
+  } catch {
+    sendMessage(socket, { type: 'build_status', content: 'No commits yet, creating initial commit...' })
+    execSync('git commit --allow-empty -m "contuts: root"', { cwd, stdio: 'pipe' })
+  }
 
   sendMessage(socket, { type: 'build_status', content: `Creating worktree at ${buildWorktreePath}...` })
 
@@ -60,6 +109,7 @@ function handleBuild(socket: net.Socket, content: string, buildRepoPath?: string
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e)
     sendMessage(socket, { type: 'error', content: `Worktree creation failed: ${msg}` })
+    sendMessage(socket, { type: 'mode_change', mode: 'plan' })
     isBuilding = false
     return
   }
@@ -67,11 +117,12 @@ function handleBuild(socket: net.Socket, content: string, buildRepoPath?: string
   sendMessage(socket, { type: 'build_status', content: `Branch: ${buildBranch}` })
   sendMessage(socket, { type: 'build_status', content: 'Running opencode...' })
 
+  const buildPrompt = `[SYSTEM: BUILD MODE] You are in build mode. You have full write permissions in the worktree.\n\n${content}`
   const buildArgs = ['run', '--format', 'json', '--auto']
   if (chatSessionID) {
     buildArgs.push('--session', chatSessionID)
   }
-  buildArgs.push(content)
+  buildArgs.push(buildPrompt)
 
   const proc = spawn('opencode', buildArgs, {
     cwd: buildWorktreePath,
@@ -83,6 +134,7 @@ function handleBuild(socket: net.Socket, content: string, buildRepoPath?: string
   const timer = setTimeout(() => {
     proc.kill('SIGTERM')
     sendMessage(socket, { type: 'error', content: 'Build timed out after 5 minutes' })
+    sendMessage(socket, { type: 'mode_change', mode: 'plan' })
     isBuilding = false
   }, STALE_TIMEOUT)
 
@@ -125,18 +177,20 @@ function handleBuild(socket: net.Socket, content: string, buildRepoPath?: string
     } catch {
       sendMessage(socket, { type: 'build_status', content: 'Nothing to commit (no changes made).' })
     }
-    collectBuildResult(socket, cwd)
+    collectBuildResult(socket, cwd, baseBranch)
   })
 
   proc.on('error', (err) => {
     clearTimeout(timer)
     sendMessage(socket, { type: 'error', content: `opencode failed: ${err.message}` })
+    sendMessage(socket, { type: 'mode_change', mode: 'plan' })
     isBuilding = false
   })
 }
 
-function collectBuildResult(socket: net.Socket, cwd?: string): void {
+function collectBuildResult(socket: net.Socket, cwd?: string, baseBranch?: string): void {
   const repo = cwd || repoPath
+  const base = baseBranch || detectDefaultBranch(repo)
   if (!buildBranch || !buildTaskId) {
     sendMessage(socket, { type: 'error', content: 'No build to collect results from' })
     isBuilding = false
@@ -146,9 +200,9 @@ function collectBuildResult(socket: net.Socket, cwd?: string): void {
   try {
     const branch = buildBranch
 
-    const diffStat = execSync(`git diff main...${branch} --stat`, { cwd: repo, encoding: 'utf-8' }).trim()
-    const numstat = execSync(`git diff main...${branch} --numstat`, { cwd: repo, encoding: 'utf-8' }).trim()
-    const log = execSync(`git log main..${branch} --oneline`, { cwd: repo, encoding: 'utf-8' }).trim()
+    const diffStat = execSync(`git diff ${base}...${branch} --stat`, { cwd: repo, encoding: 'utf-8' }).trim()
+    const numstat = execSync(`git diff ${base}...${branch} --numstat`, { cwd: repo, encoding: 'utf-8' }).trim()
+    const log = execSync(`git log ${base}..${branch} --oneline`, { cwd: repo, encoding: 'utf-8' }).trim()
 
     const files: string[] = []
     let insertions = 0
@@ -168,6 +222,7 @@ function collectBuildResult(socket: net.Socket, cwd?: string): void {
       type: 'build_result',
       taskId: buildTaskId,
       branch,
+      baseBranch: base,
       files,
       insertions,
       deletions,
@@ -181,6 +236,7 @@ function collectBuildResult(socket: net.Socket, cwd?: string): void {
     sendMessage(socket, { type: 'error', content: `Failed to collect results: ${msg}` })
   }
 
+  sendMessage(socket, { type: 'mode_change', mode: 'plan' })
   isBuilding = false
 }
 
@@ -199,9 +255,10 @@ function handleMerge(socket: net.Socket): void {
 
     // Clean up
     execSync(`git worktree remove ${wtPath}`, { cwd: repoPath, stdio: 'pipe' })
+    const base = detectDefaultBranch(repoPath)
     execSync(`git branch -D ${branch}`, { cwd: repoPath, stdio: 'pipe' })
 
-    sendMessage(socket, { type: 'build_status', content: `Merged ${branch} into main` })
+    sendMessage(socket, { type: 'build_status', content: `Merged ${branch} into ${base}` })
 
     buildBranch = null
     buildWorktreePath = null
@@ -237,7 +294,13 @@ function handleDiscard(socket: net.Socket): void {
 }
 
 function handlePrompt(socket: net.Socket, content: string): void {
-  const proc = spawn('opencode', ['run', '--format', 'json', content], {
+  const cwd = repoPath
+  chmodRepo(cwd, true)
+
+  const prompt = `[SYSTEM: PLAN MODE] You are in plan mode. You may read files for context, but you MUST NOT create, edit, or delete any files. Only discuss and analyze.\n\n${content}`
+
+  const proc = spawn('opencode', ['run', '--format', 'json', prompt], {
+    cwd,
     env: { ...process.env },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -262,10 +325,12 @@ function handlePrompt(socket: net.Socket, content: string): void {
   })
 
   proc.on('close', () => {
+    chmodRepo(cwd, false)
     sendMessage(socket, { type: 'response', content: responseText })
   })
 
   proc.on('error', () => {
+    chmodRepo(cwd, false)
     sendMessage(socket, { type: 'error', content: 'Failed to run opencode' })
   })
 }
@@ -311,8 +376,8 @@ const server = net.createServer((socket: net.Socket) => {
     }
   })
 
-  socket.on('close', () => {})
-  socket.on('error', () => {})
+  socket.on('close', () => { })
+  socket.on('error', () => { })
 })
 
 server.listen(0, '127.0.0.1', () => {

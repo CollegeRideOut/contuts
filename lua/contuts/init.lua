@@ -26,7 +26,7 @@ local function on_data(_, data, event)
     if trimmed ~= '' then
       local ok, msg = pcall(vim.json.decode, trimmed)
       if ok then
-        if on_notification and (msg.type == 'build_status' or msg.type == 'error') then
+        if on_notification and (msg.type == 'build_status' or msg.type == 'error' or msg.type == 'mode_change') then
           on_notification(msg)
         end
         if msg.type == 'build_result' then
@@ -149,8 +149,9 @@ vim.api.nvim_create_user_command('ContutsReview', function()
     vim.notify('contuts: no build to review', vim.log.levels.ERROR)
     return
   end
-  vim.cmd('tab Git log --oneline main..' .. build.branch)
-  vim.cmd('tab Git diff main...' .. build.branch)
+  local base = build.baseBranch or 'main'
+  vim.cmd('tab Git log --oneline ' .. base .. '..' .. build.branch)
+  vim.cmd('tab Git diff ' .. base .. '...' .. build.branch)
 end, { desc = 'Review the last build result (log + diff)' })
 
 vim.api.nvim_create_user_command('ContutsMerge', function()
@@ -162,7 +163,7 @@ vim.api.nvim_create_user_command('ContutsMerge', function()
       vim.notify('contuts error: ' .. msg.content, vim.log.levels.ERROR)
     end
   end)
-end, { desc = 'Merge the last worktree branch into main' })
+end, { desc = 'Merge the last worktree branch into the base branch' })
 
 vim.api.nvim_create_user_command('ContutsDiscard', function()
   if not ensure_tcp() then return end
