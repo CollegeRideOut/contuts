@@ -26,6 +26,7 @@ interface BuildResult {
   diffStat: string
 }
 console.log("test numero 4 of contuts")
+console.log("klk test numero 5 of contuts")
 
 const repoPath = process.cwd()
 let worktreePath: string | null = null
