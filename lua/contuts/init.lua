@@ -150,9 +150,28 @@ vim.api.nvim_create_user_command('ContutsReview', function()
     return
   end
   local base = build.baseBranch or 'main'
-  vim.cmd('tab Git log --oneline ' .. base .. '..' .. build.branch)
-  vim.cmd('tab Git diff ' .. base .. '...' .. build.branch)
-end, { desc = 'Review the last build result (log + diff)' })
+  local repo = vim.fn.getcwd()
+  local files = vim.fn.systemlist('git -C ' .. vim.fn.shellescape(repo)
+    .. ' diff --name-only ' .. base .. '...' .. build.branch)
+
+  if #files == 0 then
+    vim.notify('contuts: no changed files to review', vim.log.levels.WARN)
+    return
+  end
+
+  vim.cmd('tabedit ' .. vim.fn.fnameescape(files[1]))
+  vim.cmd('Gvdiffsplit ' .. base .. '...' .. build.branch)
+
+  vim.fn.setqflist({}, 'r', {
+    title = 'Contuts Review: ' .. build.branch,
+    items = vim.tbl_map(function(f)
+      local fn = vim.fn.fnamemodify(f, ':t')
+      return { filename = f, text = fn .. ' (' .. base .. '...' .. build.branch .. ')' }
+    end, files),
+  })
+  vim.cmd('copen')
+  vim.cmd('wincmd L')
+end, { desc = 'Review the last build result side by side' })
 
 vim.api.nvim_create_user_command('ContutsMerge', function()
   if not ensure_tcp() then return end

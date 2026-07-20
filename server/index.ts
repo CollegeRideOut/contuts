@@ -67,10 +67,10 @@ function cleanupWorktree(): void {
   if (!worktreePath || !worktreeBranch) return
   try {
     execSync(`git worktree remove ${worktreePath}`, { cwd: repoPath, stdio: 'pipe' })
-  } catch {}
+  } catch { }
   try {
     execSync(`git branch -D ${worktreeBranch}`, { cwd: repoPath, stdio: 'pipe' })
-  } catch {}
+  } catch { }
   worktreePath = null
   worktreeBranch = null
 }
@@ -176,7 +176,7 @@ function handlePrompt(socket: net.Socket, content: string): void {
         if (event.type === 'text' && event.part?.text) {
           responseText += event.part.text
         }
-      } catch {}
+      } catch { }
     }
   })
 
@@ -260,7 +260,7 @@ function handleBuild(socket: net.Socket, content: string, buildRepoPath?: string
           const status = tool.state?.status === 'completed' ? '✓' : '⋯'
           sendMessage(socket, { type: 'build_status', content: `  ${status} [${tool.tool}]${title}` })
         }
-      } catch {}
+      } catch { }
     }
   })
 
@@ -302,8 +302,14 @@ function handleMerge(socket: net.Socket): void {
 
   try {
     const branch = worktreeBranch
-    execSync(`git merge --squash ${branch}`, { cwd: repoPath, stdio: 'pipe' })
-    execSync(`git commit -m "contuts: merge ${branch}"`, { cwd: repoPath, stdio: 'pipe' })
+
+    execSync('git stash', { cwd: repoPath, stdio: 'pipe' })
+    try {
+      execSync(`git merge --squash ${branch}`, { cwd: repoPath, stdio: 'pipe' })
+      execSync(`git commit -m "contuts: merge ${branch}"`, { cwd: repoPath, stdio: 'pipe' })
+    } finally {
+      execSync('git stash pop', { cwd: repoPath, stdio: 'pipe' })
+    }
 
     cleanupWorktree()
     const base = detectDefaultBranch(repoPath)
@@ -379,8 +385,8 @@ const server = net.createServer((socket: net.Socket) => {
     }
   })
 
-  socket.on('close', () => {})
-  socket.on('error', () => {})
+  socket.on('close', () => { })
+  socket.on('error', () => { })
 })
 
 server.listen(0, '127.0.0.1', () => {
