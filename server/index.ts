@@ -161,6 +161,10 @@ function handlePrompt(socket: net.Socket, content: string): void {
   let responseText = ''
   let stdoutBuf = ''
 
+  const heartbeat = setInterval(() => {
+    sendMessage(socket, { type: 'build_status', content: '  ● working...' })
+  }, 5000)
+
   proc.stdout.on('data', (chunk: Buffer) => {
     stdoutBuf += chunk.toString()
     const lines = stdoutBuf.split('\n')
@@ -181,11 +185,13 @@ function handlePrompt(socket: net.Socket, content: string): void {
   })
 
   proc.on('close', () => {
+    clearInterval(heartbeat)
     chmodRepo(worktreePath!, false)
     sendMessage(socket, { type: 'response', content: responseText })
   })
 
   proc.on('error', () => {
+    clearInterval(heartbeat)
     chmodRepo(worktreePath!, false)
     sendMessage(socket, { type: 'error', content: 'Failed to run opencode' })
   })

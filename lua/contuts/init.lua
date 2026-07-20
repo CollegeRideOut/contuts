@@ -161,11 +161,11 @@ vim.api.nvim_create_user_command('ContutsReview', function()
 
   vim.cmd('tabedit')
   local diff_left = vim.api.nvim_get_current_win()
-  vim.cmd('0Gedit ' .. base .. ':' .. files[1])
+  vim.cmd('Gedit ' .. base .. ':' .. files[1])
   vim.cmd('diffthis')
   vim.cmd('vertical rightbelow new')
   local diff_right = vim.api.nvim_get_current_win()
-  vim.cmd('0Gedit ' .. build.branch .. ':' .. files[1])
+  vim.cmd('Gedit ' .. build.branch .. ':' .. files[1])
   vim.cmd('diffthis')
   vim.wo[diff_left].scrollbind = true
   vim.wo[diff_right].scrollbind = true
@@ -192,10 +192,10 @@ vim.api.nvim_create_user_command('ContutsReview', function()
 
       if vim.api.nvim_win_is_valid(diff_left) and vim.api.nvim_win_is_valid(diff_right) then
         vim.api.nvim_set_current_win(diff_left)
-        vim.cmd('0Gedit ' .. base .. ':' .. entry.filename)
+        vim.cmd('Gedit ' .. base .. ':' .. entry.filename)
         vim.cmd('diffthis')
         vim.api.nvim_set_current_win(diff_right)
-        vim.cmd('0Gedit ' .. build.branch .. ':' .. entry.filename)
+        vim.cmd('Gedit ' .. build.branch .. ':' .. entry.filename)
         vim.cmd('diffthis')
         vim.cmd('diffupdate')
         vim.api.nvim_set_current_win(diff_left)
