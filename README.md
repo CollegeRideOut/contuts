@@ -12,7 +12,7 @@
 
 AI writes code and makes claims about your codebase faster than you can understand them. That gap — between what the AI says and what you personally know and trust — is where mistakes get accepted and understanding erodes.
 
-contuts is a tool for **collapsing that gap as fast as possible.** It doesn't verify claims for you. It doesn't trust the AI for you. It gives you the context you need to agree or disagree, then gets out of your way.
+contuts is a tool for **collapsing that gap as fast as possible.** It doesn't verify claims for you. It doesn't trust the AI for you. It gives you the context you need to judge, then gets out of your way.
 
 **Plan → Build → Review → Decide**
 
@@ -20,7 +20,7 @@ contuts is a tool for **collapsing that gap as fast as possible.** It doesn't ve
 
 ## Why this exists
 
-The current AI coding workflow is: generate → accept. You read a wall of text, trust the green diff, and move on. Over time, you understand your own codebase less. You're not collaborating — you're approving.
+The current AI coding workflow is: generate → accept. You read a wall of text, trust the green diff, and move on. Over time, you understand your own codebase less. You're not collaborating — you're rubber-stamping.
 
 contuts was built on a different belief: **planning is interactive.** When the AI says something — *"there's a race condition on line 42"*, *"this function is missing validation"* — it should come with evidence you can navigate, not just prose you have to mentally map onto your code. Your job isn't to trust. Your job is to judge, and judgment requires context.
 
@@ -79,7 +79,7 @@ ContutsPlan is being rebuilt from scratch to be the **main interaction point** �
 
 1. **Initial prompt** — You describe the problem (or a future capture layer records reality for you). The AI responds with evidence claims pinned to specific lines.
 
-2. **Iterative refinement** — You browse claims, annotate corrections, add your own evidence ("this function also matters"), and dismiss noise. The AI can rebuild its evidence model as you go — seeing what you agreed with, what you corrected, and what you added.
+2. **Iterative refinement** — You browse claims, annotate corrections, add your own evidence ("this function also matters"), and dismiss noise. The AI can rebuild its evidence model as you go — seeing what you judged correct, what you corrected, and what you added.
 
 3. **Piece-by-piece building** — You don't accept a wall of changes. You build one claim at a time, review the diff, accept or reject. Each accepted piece is committed to the shared worktree. Each rejected piece is rolled back cleanly.
 
