@@ -31,6 +31,7 @@ console.log("klk test numero 5 of contuts")
 const repoPath = process.cwd()
 let worktreePath: string | null = null
 let worktreeBranch: string | null = null
+let worktreeBaseRef: string | null = null
 let isBuilding = false
 let chatSessionID: string | null = null
 let buildTaskId: string | null = null
@@ -61,6 +62,7 @@ function ensureWorktree(cwd: string): void {
     execSync('git commit --allow-empty -m "contuts: root"', { cwd, stdio: 'pipe' })
   }
 
+  worktreeBaseRef = execSync('git rev-parse HEAD', { cwd, encoding: 'utf-8' }).trim()
   execSync(`git worktree add -b ${worktreeBranch} ${worktreePath} HEAD`, { cwd, stdio: 'pipe' })
 }
 
@@ -92,9 +94,9 @@ function generateTaskId(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
 }
 
-function collectBuildResult(socket: net.Socket, cwd?: string, baseBranch?: string): void {
+function collectBuildResult(socket: net.Socket, cwd?: string): void {
   const repo = cwd || repoPath
-  const base = baseBranch || detectDefaultBranch(repo)
+  const base = worktreeBaseRef || detectDefaultBranch(repo)
   if (!worktreeBranch || !buildTaskId) {
     sendMessage(socket, { type: 'error', content: 'No build to collect results from' })
     isBuilding = false
@@ -147,6 +149,7 @@ function collectBuildResult(socket: net.Socket, cwd?: string, baseBranch?: strin
 function handlePrompt(socket: net.Socket, content: string): void {
   const cwd = repoPath
   ensureWorktree(cwd)
+  sendMessage(socket, { type: 'build_status', content: `Branch: ${worktreeBranch}` })
 
   execSync('git checkout -f HEAD', { cwd: worktreePath!, stdio: 'pipe' })
   chmodRepo(worktreePath!, true)
@@ -208,8 +211,6 @@ function handleBuild(socket: net.Socket, content: string, buildRepoPath?: string
   isBuilding = true
   buildTaskId = generateTaskId()
   ensureWorktree(cwd)
-
-  const baseBranch = detectDefaultBranch(cwd)
 
   sendMessage(socket, { type: 'mode_change', mode: 'build' })
   sendMessage(socket, { type: 'build_status', content: `Branch: ${worktreeBranch}` })
@@ -289,7 +290,7 @@ function handleBuild(socket: net.Socket, content: string, buildRepoPath?: string
     } catch {
       sendMessage(socket, { type: 'build_status', content: 'Nothing to commit (no changes made).' })
     }
-    collectBuildResult(socket, cwd, baseBranch)
+    collectBuildResult(socket, cwd)
   })
 
   proc.on('error', (err) => {

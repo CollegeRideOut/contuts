@@ -29,7 +29,10 @@ local function on_data(_, data, event)
         if on_notification and (msg.type == 'build_status' or msg.type == 'error' or msg.type == 'mode_change') then
           on_notification(msg)
         end
-        if msg.type == 'build_result' then
+        if msg.type == 'build_status' and msg.content and msg.content:match('^Branch:') then
+          vim.notify('contuts: ' .. msg.content, vim.log.levels.INFO)
+        end
+      if msg.type == 'build_result' then
           last_build = msg
           local item = table.remove(request_queue, 1)
           if item then item(msg) end
@@ -160,49 +163,85 @@ vim.api.nvim_create_user_command('ContutsReview', function()
   end
 
   vim.cmd('tabedit')
+
+  vim.cmd('rightbelow new')
+  local list_win = vim.api.nvim_get_current_win()
+  local list_buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_win_set_buf(list_win, list_buf)
+  vim.bo[list_buf].buflisted = false
+  vim.bo[list_buf].modified = false
+  vim.wo[list_win].cursorline = true
+  vim.wo[list_win].number = true
+
+  vim.cmd('wincmd k')
   local diff_left = vim.api.nvim_get_current_win()
-  vim.cmd('Gedit ' .. base .. ':' .. files[1])
-  vim.cmd('diffthis')
   vim.cmd('vertical rightbelow new')
   local diff_right = vim.api.nvim_get_current_win()
-  vim.cmd('Gedit ' .. build.branch .. ':' .. files[1])
-  vim.cmd('diffthis')
-  vim.wo[diff_left].scrollbind = true
-  vim.wo[diff_right].scrollbind = true
   vim.api.nvim_set_current_win(diff_left)
 
-  local items = {}
-  for _, f in ipairs(files) do
-    items[#items + 1] = { filename = vim.fn.fnamemodify(f, ':.'), text = f }
+  local function file_exists(ref, filename)
+    vim.fn.system({ 'git', 'cat-file', '-e', ref .. ':' .. filename })
+    return vim.v.shell_error == 0
   end
-  vim.fn.setqflist({}, 'r', {
-    title = 'Contuts Review: ' .. build.branch,
-    items = items,
-  })
 
-  vim.cmd('copen')
-  vim.cmd('wincmd L')
+  local function load_file(win, ref, filename)
+    vim.api.nvim_set_current_win(win)
+    vim.cmd('enew!')
+    if file_exists(ref, filename) then
+      vim.cmd('Gedit ' .. ref .. ':' .. filename)
+    else
+      vim.api.nvim_buf_set_name(vim.api.nvim_get_current_buf(), 'missing-' .. ref:gsub('[^%w_-]', '_'))
+      vim.api.nvim_buf_set_option(vim.api.nvim_get_current_buf(), 'bufhidden', 'wipe')
+      vim.api.nvim_buf_set_lines(vim.api.nvim_get_current_buf(), 0, -1, false, {
+        '',
+        '  File does not exist in ' .. ref,
+        '',
+        '  ' .. filename,
+        '',
+      })
+      vim.bo[vim.api.nvim_get_current_buf()].modified = false
+    end
+    vim.cmd('diffthis')
+    vim.wo[win].scrollbind = true
+  end
 
-  vim.api.nvim_buf_set_keymap(vim.fn.bufnr('%'), 'n', '<CR>', '', {
-    noremap = true, silent = true,
+  local function load_diff(filename)
+    if not vim.api.nvim_win_is_valid(diff_left) or not vim.api.nvim_win_is_valid(diff_right) then
+      vim.notify('contuts review: diff windows closed', vim.log.levels.ERROR)
+      return
+    end
+    load_file(diff_left, base, filename)
+    load_file(diff_right, build.branch, filename)
+    vim.cmd('diffupdate')
+    vim.api.nvim_set_current_win(diff_left)
+  end
+
+  load_diff(files[1])
+
+  local lines = {}
+  for _, f in ipairs(files) do
+    lines[#lines + 1] = f
+  end
+  vim.api.nvim_buf_set_lines(list_buf, 0, -1, false, lines)
+
+  vim.api.nvim_buf_set_keymap(list_buf, 'n', '<CR>', '', {
+    silent = true,
     callback = function()
-      local qf = vim.fn.getqflist({ items = 1, idx = 1 })
-      local entry = qf.items and qf.items[qf.idx]
-      if not entry or not entry.filename then return end
-
-      if vim.api.nvim_win_is_valid(diff_left) and vim.api.nvim_win_is_valid(diff_right) then
-        vim.api.nvim_set_current_win(diff_left)
-        vim.cmd('Gedit ' .. base .. ':' .. entry.filename)
-        vim.cmd('diffthis')
-        vim.api.nvim_set_current_win(diff_right)
-        vim.cmd('Gedit ' .. build.branch .. ':' .. entry.filename)
-        vim.cmd('diffthis')
-        vim.cmd('diffupdate')
-        vim.api.nvim_set_current_win(diff_left)
+      local line = vim.fn.getline('.')
+      if line and line ~= '' then
+        load_diff(line)
       end
     end,
   })
 
+  vim.api.nvim_buf_set_keymap(list_buf, 'n', 'q', '', {
+    silent = true,
+    callback = function()
+      vim.api.nvim_win_close(list_win, true)
+    end,
+  })
+
+  vim.api.nvim_set_current_win(diff_left)
   vim.cmd('wincmd =')
 end, { desc = 'Review the last build result side by side' })
 
