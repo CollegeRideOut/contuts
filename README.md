@@ -1,55 +1,48 @@
 # contuts
 
-> **Human-in-the-loop AI code review for people who trust humans more than agents.**
+> **Context is the bottleneck, not code generation.**
 
-> **License:** AGPL-3.0 — You can use, study, and share contuts freely. If you modify and distribute it, your changes must be shared under the same license. The code is not yours to close off.
+> **License:** AGPL-3.0 — You can use, study, and share contuts freely. If you modify and distribute it, your changes must be shared under the same license.
 
 > **⚠ PROTOTYPE** — Proof of concept, actively evolving. Expect rough edges.
 
 ---
 
-## Mission
+## What this is
 
-AI generates code at an incredible pace. The bottleneck is no longer writing code — it's **understanding, verifying, and deciding** what to accept.
+AI writes code and makes claims about your codebase faster than you can understand them. That gap — between what the AI says and what you personally know and trust — is where mistakes get accepted and understanding erodes.
 
-contuts flips the default: AI works in isolated git worktrees, never touching your real branch. Every change must be explicitly reviewed before it merges. Every claim the AI makes about your code should be navigable, verifiable, and interactive.
+contuts is a tool for **collapsing that gap as fast as possible.** It doesn't verify claims for you. It doesn't trust the AI for you. It gives you the context you need to agree or disagree, then gets out of your way.
 
-**Plan → Build → Review → Merge**
-
-No auto-merge. No blind trust. You see everything before it lands.
-
-### Why contuts exists
-
-The current paradigm is generate → accept. AI writes, humans rubber-stamp. That's not collaboration, it's delegation with extra steps.
-
-contuts was built on a different belief: **planning is inherently interactive.** An AI that reads your code and comes back with answers should also come back with evidence — specific file paths, line numbers, severity levels — so you can verify each claim without leaving your editor. Static analysis tools and runtime information should be woven into that evidence to validate or challenge what the AI says. Every claim should be clickable, navigable, and refutable.
-
-This is what we mean by **building human context** — reducing the distance between "the AI said something" and "I understand it well enough to agree or disagree." The faster you can build that context, the faster you can make real decisions. Not rubber-stamps, decisions.
+**Plan → Build → Review → Decide**
 
 ---
 
-## How It Works
+## Why this exists
 
-contuts wraps [opencode](https://opencode.ai) with a structured four-phase workflow:
+The current AI coding workflow is: generate → accept. You read a wall of text, trust the green diff, and move on. Over time, you understand your own codebase less. You're not collaborating — you're approving.
+
+contuts was built on a different belief: **planning is interactive.** When the AI says something — *"there's a race condition on line 42"*, *"this function is missing validation"* — it should come with evidence you can navigate, not just prose you have to mentally map onto your code. Your job isn't to trust. Your job is to judge, and judgment requires context.
+
+The faster you can build that context, the faster you can make real decisions. Not rubber-stamps, decisions.
+
+---
+
+## How it works
 
 | Phase | Command | What happens |
 |---|---|---|
-| **Plan** | `:ContutsPrompt` | AI reads your codebase in a read-only worktree. It can answer questions, find bugs, and explain code — but cannot write a single byte. |
-| **Build** | `:ContutsBuild [msg]` | AI gets write access to the worktree. It implements changes, then commits them. You get a summary of files changed and lines added/removed. |
-| **Review** | `:ContutsReview` | Side-by-side vimdiff of every changed file. Navigate through the file list, press Enter to load any file into the diff. See exactly what the AI did. |
-| **Merge** | `:ContutsMerge` | Squash-merge the worktree branch into your current branch. Only after you've reviewed everything. |
-| **Discard** | `:ContutsDiscard` | Delete the worktree and branch. Walk away clean. |
+| **Plan** | `:ContutsPrompt` | AI reads your codebase in a read-only worktree. It can answer questions, find bugs, and explain code — but cannot write a single byte. Every claim includes navigable evidence. |
+| **Build** | `:ContutsBuild [msg]` | AI gets write access to the worktree. It implements changes, then commits them. |
+| **Review** | `:ContutsReview` | Side-by-side vimdiff of every changed file. Navigate with Enter. See exactly what the AI did. |
+| **Merge** | `:ContutsMerge` | Squash-merge the worktree branch into your current branch. |
+| **Discard** | `:ContutsDiscard` | Delete the worktree and branch. |
 
 ---
 
-## Contuts Review (in detail)
+## Contuts Review
 
-The review is the heart of contuts. When you run `:ContutsReview`:
-
-1. A new tab opens with three windows:
-   - **Top-left:** The file from your current branch (before AI changes)
-   - **Top-right:** The same file from the worktree branch (after AI changes)
-   - **Bottom:** A navigable file list of every changed file (full width)
+A three-window layout showing exactly what the AI changed, compared against your branch HEAD (not `main` — only the AI's changes, not everything since main).
 
 ```
 +----------------------+----------------------+
@@ -64,41 +57,39 @@ The review is the heart of contuts. When you run `:ContutsReview`:
 +---------------------------------------------+
 ```
 
-2. Move through the list with `j`/`k`, press **Enter** on any file.
-3. Both sides reload with the new file and diff highlights update.
-4. The diff base is the exact commit where the worktree was created (your branch HEAD at the time), not `main`. You see **only what the AI changed**, not everything since `main`.
+- `<CR>` on any file loads it into both diff windows
+- The diff base is the exact commit where the worktree was forked
 
 ---
 
-## Evidence Viewer
+## Contuts Evidence
 
-When the AI makes claims during planning — *"there's a race condition on line 42"*, *"this function lacks validation"* — `:ContutsEvidence` turns those claims into colored marks on your code.
+The core of the context-building idea. When the AI makes claims, each one is attached to a specific file and line with a severity — not buried in a paragraph.
 
 ```
 +--------------------------------------+
 |  File opened at claimed line         |
-|  ⚑ line 42 — full line highlighted    |
-|  ⚑ line 88 — full line highlighted    |
+|  ⚑ line 42 — background highlighted  |
+|  ⚐ line 88 — background highlighted  |
 +--------------------------------------+
 |  ⚑  src/ticket.service.ts:42 Race    |
 |  ⚑  src/ticket.service.ts:88 Valid   |
 |  ⚐  src/auth.service.ts:15 No auth   |
-|  <CR> = open file    d = detail       |
+|  <CR> = open file   d = detail        |
 +--------------------------------------+
 ```
 
-- `⚑` **red** — error severity (full line background `#5c1a1a`)
-- `⚐` **yellow** — warning severity (full line background `#5c5a1a`)
-- `●` **blue** — info severity (full line background `#1a3c5c`)
-- **`d`** on any claim → floating window with full explanation
+- **`<CR>`** on a claim → opens the file at that line, highlights all claims for that file
+- **`d`** on a claim → floating window with the full explanation
 - **`<Leader>ce`** anywhere on a marked line → shows the claim detail
-- Marks are **ephemeral** — they don't touch your files, only the display
+- **Colors by severity:** red (`⚑`), yellow (`⚐`), blue (`●`)
+- Marks are ephemeral — they don't touch your files
 
-### Planned: Respond to Claims
+Evidence doesn't prove or verify. It gives you a starting point — the fastest possible path from "I don't understand this claim" to "I have enough information to judge it."
 
-Each claim will become interactive — you can disagree, ask for clarification, or confirm. Your responses are batched into a single follow-up prompt to the AI. No mini-chats, just structured human feedback appended to the same conversation.
+### What evidence should become
 
-The current evidence format uses a `<evidence>JSON</evidence>` tag embedded in the AI's response. The long-term plan is a formal JSON message protocol over TCP with typed schemas.
+The current system just colors AI claims. The next step is to weave in real tools — linters, type checkers, git blame, data flow graphs — not to prove the AI right or wrong, but to **collapse context faster.** You press a key, you see the relevant flow, the related functions, the last time this line changed. You still make the call. The tool just makes sure you have enough to make it well.
 
 ---
 
@@ -130,15 +121,10 @@ Neovim                          Node.js server                  opencode
                                      │                     (isolated)
                                ┌─────┴─────┐
                                │  git diff  │
-                               │  --stat    │
-                               │  --numstat │
                                └───────────┘
 ```
 
-- The worktree lives at `../contuts-<id>/` — never touches your real working tree.
-- Plan mode: worktree is **read-only** (`chmod a-w`).
-- Build mode: worktree is **writable**, changes are `git commit`ed automatically.
-- Worktree is forked from your current branch HEAD, not from `main`. Diffs are accurate.
+Plan mode: worktree is read-only. Build mode: writable, changes committed automatically. Worktree is forked from your current HEAD.
 
 ---
 
@@ -164,11 +150,11 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 
 ---
 
-## The Irony
+## The irony
 
 This entire project was fully vibecoded by an AI agent talking to a human who kept saying *"no, make me review everything first"* — directly violating contuts' own mission of human-in-the-loop review.
 
-The tool that maximizes human decision-making was built by an agent, because the human refused to let the agent run unchecked.
+The tool that maximizes human context was built by an agent, because the human refused to let the agent run unchecked.
 
 Agent: *"go brrrrr"*
 Human: *"not on my branch you don't"*
