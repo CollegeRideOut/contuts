@@ -77,7 +77,7 @@ A split view with evidence claims in a list and the referenced file open:
 
 ContutsPlan is being rebuilt from scratch to be the **main interaction point** — merging plan and build into one fluid session:
 
-1. **Initial prompt** — You describe the problem. The AI responds with evidence claims pinned to specific lines.
+1. **Initial prompt** — You describe the problem (or a future capture layer records reality for you). The AI responds with evidence claims pinned to specific lines.
 
 2. **Iterative refinement** — You browse claims, annotate corrections, add your own evidence ("this function also matters"), and dismiss noise. The AI can rebuild its evidence model as you go — seeing what you agreed with, what you corrected, and what you added.
 
@@ -188,6 +188,35 @@ Neovim                          Node.js server                  opencode
 Plan mode: worktree is read-only. Build mode: writable, changes committed automatically. Plan proposals: changes written but not committed until you accept. Worktree is forked from your current HEAD.
 
 ---
+
+## Future direction: evidence from anywhere
+
+Evidence today comes from one channel: the AI explains its reasoning
+about your code, and you judge. But evidence can be stronger when it
+doesn't start with a claim at all — when it starts with reality.
+
+A future direction for contuts is an evidence acquisition layer that
+captures **what actually happened** and feeds it directly into the
+evidence model. The human never translates the problem into a prompt.
+They observe a discrepancy, the capture layer records reality, and
+contuts maps it to code.
+
+No fixed shape — it adapts to where the problem lives:
+
+| Source | What it captures |
+|---|---|
+| Frontend | Screenshots, DOM state, user flows, network payloads, expected vs actual |
+| Backend | Debug-mode traces, request/response logs, database state, execution graphs |
+| End-to-end | Full replay: user action → system layers → where reality deviated |
+
+The AI reads the raw capture and builds evidence from it — claims
+pinned to code, just like today. But the starting point is grounded in
+observation, not generation.
+
+The principle: **the best problem description is the problem itself,
+not the human's attempt to explain it.** This isn't active development
+today. It's a direction — a way to make evidence stronger and less
+AI-reliant by anchoring it in real behavior.
 
 ## Requirements
 
