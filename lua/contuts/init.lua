@@ -5,6 +5,7 @@ local tcp_chan = nil
 local request_queue = {}
 local on_notification = nil
 local last_build = nil
+local last_evidence = nil
 
 local function get_root()
   local src = debug.getinfo(1).source:match('@(.+)')
@@ -32,7 +33,12 @@ local function on_data(_, data, event)
         if msg.type == 'build_status' and msg.content and msg.content:match('^Branch:') then
           vim.notify('contuts: ' .. msg.content, vim.log.levels.INFO)
         end
-      if msg.type == 'build_result' then
+        if msg.type == 'evidence' then
+          last_evidence = msg.items
+          require('contuts.evidence').set_items(msg.items)
+          vim.notify('contuts: ' .. #(msg.items or {}) .. ' evidence claims received', vim.log.levels.INFO)
+        end
+        if msg.type == 'build_result' then
           last_build = msg
           local item = table.remove(request_queue, 1)
           if item then item(msg) end
@@ -113,6 +119,10 @@ end
 
 function M.get_last_build()
   return last_build
+end
+
+function M.get_last_evidence()
+  return last_evidence
 end
 
 local function ensure_tcp()
@@ -245,6 +255,10 @@ vim.api.nvim_create_user_command('ContutsReview', function()
   vim.cmd('wincmd =')
 end, { desc = 'Review the last build result side by side' })
 
+vim.api.nvim_create_user_command('ContutsEvidence', function()
+  require('contuts.evidence').open()
+end, { desc = 'View evidence claims from the last AI response' })
+
 vim.api.nvim_create_user_command('ContutsMerge', function()
   if not ensure_tcp() then return end
   M.send({ type = 'build_merge' }, function(msg)
@@ -272,6 +286,10 @@ vim.api.nvim_create_user_command('ContutsRestart', function()
   vim.wait(500, function() return false end, 50)
   M.start()
 end, { desc = 'Restart the contuts server' })
+
+vim.keymap.set('n', '<Leader>ce', function()
+  require('contuts.evidence').show_detail()
+end, { desc = 'Show contuts evidence claim detail for the line under cursor' })
 
 vim.api.nvim_create_autocmd('VimLeavePre', {
   callback = function()

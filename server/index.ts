@@ -154,7 +154,10 @@ function handlePrompt(socket: net.Socket, content: string): void {
   execSync('git checkout -f HEAD', { cwd: worktreePath!, stdio: 'pipe' })
   chmodRepo(worktreePath!, true)
 
-  const prompt = `[SYSTEM: PLAN MODE] You are in plan mode. You may read files for context, but you MUST NOT create, edit, or delete any files. Only discuss and analyze.\n\n${content}`
+  const evidenceInstruction = `
+[SYSTEM: EVIDENCE] At the end of your response, if you reference specific code locations, include an <evidence> tag with a JSON array of claims. Each claim must have: file (relative path), line (1-based number), claim (short phrase), detail (full explanation sentence), severity (one of: error, warning, info). Example: <evidence>[{"file":"src/main.ts","line":42,"claim":"Unhandled promise rejection","detail":"The async function lacks a .catch() handler.","severity":"error"}]</evidence> If you don't reference any code, output <evidence></evidence>.`
+
+  const prompt = `[SYSTEM: PLAN MODE] You are in plan mode. You may read files for context, but you MUST NOT create, edit, or delete any files. Only discuss and analyze.\n\n${content}${evidenceInstruction}`
 
   const proc = spawn('opencode', ['run', '--format', 'json', prompt], {
     cwd: worktreePath!,
@@ -191,6 +194,18 @@ function handlePrompt(socket: net.Socket, content: string): void {
   proc.on('close', () => {
     clearInterval(heartbeat)
     chmodRepo(worktreePath!, false)
+
+    const evidenceMatch = responseText.match(/<evidence>([\s\S]*?)<\/evidence>/)
+    if (evidenceMatch) {
+      try {
+        const items = JSON.parse(evidenceMatch[1].trim())
+        if (Array.isArray(items) && items.length > 0) {
+          sendMessage(socket, { type: 'evidence', items })
+        }
+      } catch { }
+      responseText = responseText.replace(/<evidence>[\s\S]*?<\/evidence>/, '').trim()
+    }
+
     sendMessage(socket, { type: 'response', content: responseText })
   })
 
