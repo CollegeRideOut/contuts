@@ -2,6 +2,15 @@
 
 **Currently Neovim-only. More editors coming soon.**
 
+# Agent Development Engine
+
+An editor-agnostic engine for human-controlled AI software development. Agents implement code, static analysis verifies reality, and interactive context magnifies the developer's understanding before changes are accepted.
+
+# Every AI answer should become interactive.
+
+AI provides hypotheses, explanations, and intent.
+The engine turns those into navigable, verifiable engineering knowledge through static analysis, Git history, and runtime information.
+
 **Plan → Build → Review → Merge**
 
 A Neovim plugin that wraps opencode with a human-in-the-loop workflow. AI works in isolated git worktrees with explicit read-only (plan) and writable (build) modes. Every change is reviewed before it touches your main branch.
@@ -46,6 +55,9 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
   end
 }
 ```
+
+
+
 
 ## The irony
 
