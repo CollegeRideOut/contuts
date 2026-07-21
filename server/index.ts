@@ -7,6 +7,10 @@ interface Message {
   content?: string
   repoPath?: string
   mode?: string
+  diff?: string
+  diffStat?: string
+  files?: string[]
+  proposalId?: string
 }
 
 interface ReadyMessage {
@@ -36,6 +40,7 @@ let isBuilding = false
 let chatSessionID: string | null = null
 let buildTaskId: string | null = null
 let defaultBranch: string | null = null
+let pendingProposal: { stashed: boolean } | null = null
 
 function detectDefaultBranch(cwd: string): string {
   if (defaultBranch) return defaultBranch
@@ -366,6 +371,165 @@ function handleDiscard(socket: net.Socket): void {
   }
 }
 
+function handlePlanBuild(socket: net.Socket, content: string): void {
+  const cwd = repoPath
+  if (isBuilding || pendingProposal) {
+    sendMessage(socket, { type: 'error', content: 'A build or proposal is already in progress' })
+    return
+  }
+
+  ensureWorktree(cwd)
+  sendMessage(socket, { type: 'build_status', content: `Branch: ${worktreeBranch}` })
+  chmodRepo(worktreePath!, false)
+
+  let stashed = false
+  try {
+    execSync('git stash push -m "contuts: pre-proposal"', { cwd: worktreePath!, stdio: 'pipe' })
+    stashed = true
+  } catch { }
+
+  const buildPrompt = `[SYSTEM: BUILD MODE] You have full write permissions in the worktree. Make the following targeted change. Do NOT write any commentary — just implement the change and stop.\n\n${content}`
+  const buildArgs = ['run', '--format', 'json', '--auto']
+  if (chatSessionID) buildArgs.push('--session', chatSessionID)
+  buildArgs.push(buildPrompt)
+
+  const proc = spawn('opencode', buildArgs, {
+    cwd: worktreePath!,
+    env: { ...process.env },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+
+  const STALE_TIMEOUT = 3 * 60 * 1000
+  const timer = setTimeout(() => {
+    proc.kill('SIGTERM')
+    if (stashed) {
+      try { execSync('git stash pop', { cwd: worktreePath!, stdio: 'pipe' }) } catch { }
+    }
+    pendingProposal = null
+    sendMessage(socket, { type: 'error', content: 'Plan build timed out after 3 minutes' })
+  }, STALE_TIMEOUT)
+
+  let stderrBuf = ''
+  let stdoutBuf = ''
+  let errored = false
+
+  proc.stdout.on('data', (chunk: Buffer) => {
+    stdoutBuf += chunk.toString()
+    const lines = stdoutBuf.split('\n')
+    stdoutBuf = lines.pop() ?? ''
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      try {
+        const event = JSON.parse(trimmed)
+        if (event.type === 'text' && event.part?.text) {
+          sendMessage(socket, { type: 'build_status', content: event.part.text })
+        }
+      } catch { }
+    }
+  })
+
+  proc.stderr.on('data', (chunk: Buffer) => {
+    stderrBuf += chunk.toString()
+  })
+
+  proc.on('close', () => {
+    clearTimeout(timer)
+    if (errored) return
+    if (stderrBuf.trim()) {
+      sendMessage(socket, { type: 'build_status', content: `stderr: ${stderrBuf.trim()}` })
+    }
+
+    try {
+      const diffOutput = execSync('git diff HEAD', { cwd: worktreePath!, encoding: 'utf-8' }).trim()
+      if (!diffOutput) {
+        if (stashed) {
+          try { execSync('git stash pop', { cwd: worktreePath!, stdio: 'pipe' }); stashed = false } catch { }
+        }
+        pendingProposal = null
+        sendMessage(socket, { type: 'plan_proposal', diff: '', files: [] })
+        return
+      }
+
+      const diffStat = execSync('git diff HEAD --stat', { cwd: worktreePath!, encoding: 'utf-8' }).trim()
+      const numstat = execSync('git diff HEAD --numstat', { cwd: worktreePath!, encoding: 'utf-8' }).trim()
+      const files: string[] = []
+      for (const line of numstat.split('\n')) {
+        if (!line.trim()) continue
+        const parts = line.split('\t')
+        if (parts.length === 3) files.push(parts[2])
+      }
+
+      pendingProposal = { stashed }
+      sendMessage(socket, {
+        type: 'plan_proposal',
+        diff: diffOutput,
+        diffStat,
+        files,
+      })
+    } catch (e: unknown) {
+      if (stashed) {
+        try { execSync('git stash pop', { cwd: worktreePath!, stdio: 'pipe' }); stashed = false } catch { }
+      }
+      pendingProposal = null
+      const msg = e instanceof Error ? e.message : String(e)
+      sendMessage(socket, { type: 'error', content: `Proposal failed: ${msg}` })
+    }
+  })
+
+  proc.on('error', (err) => {
+    clearTimeout(timer)
+    errored = true
+    if (stashed) {
+      try { execSync('git stash pop', { cwd: worktreePath!, stdio: 'pipe' }) } catch { }
+    }
+    pendingProposal = null
+    sendMessage(socket, { type: 'error', content: `opencode failed: ${err.message}` })
+  })
+}
+
+function handlePlanAccept(socket: net.Socket): void {
+  if (!pendingProposal) {
+    sendMessage(socket, { type: 'error', content: 'No pending proposal to accept' })
+    return
+  }
+
+  try {
+    const stashed = pendingProposal.stashed
+    execSync('git add -A', { cwd: worktreePath!, stdio: 'pipe' })
+    execSync('git commit -m "contuts: plan proposal"', { cwd: worktreePath!, stdio: 'pipe' })
+    if (stashed) {
+      try { execSync('git stash pop', { cwd: worktreePath!, stdio: 'pipe' }) } catch { }
+    }
+    pendingProposal = null
+    sendMessage(socket, { type: 'plan_accepted' })
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e)
+    sendMessage(socket, { type: 'error', content: `Accept failed: ${msg}` })
+  }
+}
+
+function handlePlanReject(socket: net.Socket): void {
+  if (!pendingProposal) {
+    sendMessage(socket, { type: 'error', content: 'No pending proposal to reject' })
+    return
+  }
+
+  try {
+    const stashed = pendingProposal.stashed
+    execSync('git checkout HEAD -- .', { cwd: worktreePath!, stdio: 'pipe' })
+    try { execSync('git clean -fd', { cwd: worktreePath!, stdio: 'pipe' }) } catch { }
+    if (stashed) {
+      try { execSync('git stash pop', { cwd: worktreePath!, stdio: 'pipe' }) } catch { }
+    }
+    pendingProposal = null
+    sendMessage(socket, { type: 'plan_rejected' })
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e)
+    sendMessage(socket, { type: 'error', content: `Reject failed: ${msg}` })
+  }
+}
+
 function handleMessage(socket: net.Socket, msg: Message): void {
   switch (msg.type) {
     case 'prompt':
@@ -373,6 +537,15 @@ function handleMessage(socket: net.Socket, msg: Message): void {
       break
     case 'build':
       handleBuild(socket, msg.content ?? '', msg.repoPath)
+      break
+    case 'plan_build':
+      handlePlanBuild(socket, msg.content ?? '')
+      break
+    case 'plan_accept':
+      handlePlanAccept(socket)
+      break
+    case 'plan_reject':
+      handlePlanReject(socket)
       break
     case 'build_merge':
       handleMerge(socket)

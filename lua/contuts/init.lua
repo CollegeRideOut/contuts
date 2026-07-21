@@ -38,6 +38,13 @@ local function on_data(_, data, event)
           require('contuts.evidence').set_items(msg.items)
           vim.notify('contuts: ' .. #(msg.items or {}) .. ' evidence claims received', vim.log.levels.INFO)
         end
+        if msg.type == 'plan_proposal' then
+          require('contuts.evidence').set_proposal_state('proposed', { diff = msg.diff or '', files = msg.files or {}, diffStat = msg.diffStat or '' })
+        elseif msg.type == 'plan_accepted' then
+          require('contuts.evidence').set_proposal_state('accepted')
+        elseif msg.type == 'plan_rejected' then
+          require('contuts.evidence').set_proposal_state('rejected')
+        end
         if msg.type == 'build_result' then
           last_build = msg
           local item = table.remove(request_queue, 1)
@@ -46,6 +53,9 @@ local function on_data(_, data, event)
           local item = table.remove(request_queue, 1)
           if item then item(msg) end
         elseif msg.type == 'error' then
+          local item = table.remove(request_queue, 1)
+          if item then item(msg) end
+        elseif msg.type == 'plan_proposal' or msg.type == 'plan_accepted' or msg.type == 'plan_rejected' then
           local item = table.remove(request_queue, 1)
           if item then item(msg) end
         end
@@ -143,6 +153,10 @@ vim.api.nvim_create_user_command('ContutsBuild', function(opts)
   if msg == '' then
     msg = 'Please implement the changes we discussed'
   end
+  local evidence_text = require('contuts.evidence').get_active_text()
+  if evidence_text and evidence_text ~= '' then
+    msg = msg .. '\n\n── Planning context (evidence and annotations) ──\n' .. evidence_text
+  end
   require('contuts.chat').open()
   vim.schedule(function()
     M.send({ type = 'build', content = msg, repoPath = vim.fn.getcwd() }, function(result)
@@ -162,102 +176,74 @@ vim.api.nvim_create_user_command('ContutsReview', function()
     vim.notify('contuts: no build to review', vim.log.levels.ERROR)
     return
   end
-  local base = build.baseBranch or 'main'
-  local repo = vim.fn.getcwd()
-  local files = vim.fn.systemlist('git -C ' .. vim.fn.shellescape(repo)
-    .. ' diff --name-only ' .. base .. '...' .. build.branch)
-
-  if #files == 0 then
-    vim.notify('contuts: no changed files to review', vim.log.levels.WARN)
-    return
-  end
-
-  vim.cmd('tabedit')
-
-  vim.cmd('rightbelow new')
-  local list_win = vim.api.nvim_get_current_win()
-  local list_buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_win_set_buf(list_win, list_buf)
-  vim.bo[list_buf].buflisted = false
-  vim.bo[list_buf].modified = false
-  vim.wo[list_win].cursorline = true
-  vim.wo[list_win].number = true
-
-  vim.cmd('wincmd k')
-  local diff_left = vim.api.nvim_get_current_win()
-  vim.cmd('vertical rightbelow new')
-  local diff_right = vim.api.nvim_get_current_win()
-  vim.api.nvim_set_current_win(diff_left)
-
-  local function file_exists(ref, filename)
-    vim.fn.system({ 'git', 'cat-file', '-e', ref .. ':' .. filename })
-    return vim.v.shell_error == 0
-  end
-
-  local function load_file(win, ref, filename)
-    vim.api.nvim_set_current_win(win)
-    vim.cmd('enew!')
-    if file_exists(ref, filename) then
-      vim.cmd('Gedit ' .. ref .. ':' .. filename)
-    else
-      vim.api.nvim_buf_set_name(vim.api.nvim_get_current_buf(), 'missing-' .. ref:gsub('[^%w_-]', '_'))
-      vim.api.nvim_buf_set_option(vim.api.nvim_get_current_buf(), 'bufhidden', 'wipe')
-      vim.api.nvim_buf_set_lines(vim.api.nvim_get_current_buf(), 0, -1, false, {
-        '',
-        '  File does not exist in ' .. ref,
-        '',
-        '  ' .. filename,
-        '',
-      })
-      vim.bo[vim.api.nvim_get_current_buf()].modified = false
-    end
-    vim.cmd('diffthis')
-    vim.wo[win].scrollbind = true
-  end
-
-  local function load_diff(filename)
-    if not vim.api.nvim_win_is_valid(diff_left) or not vim.api.nvim_win_is_valid(diff_right) then
-      vim.notify('contuts review: diff windows closed', vim.log.levels.ERROR)
-      return
-    end
-    load_file(diff_left, base, filename)
-    load_file(diff_right, build.branch, filename)
-    vim.cmd('diffupdate')
-    vim.api.nvim_set_current_win(diff_left)
-  end
-
-  load_diff(files[1])
-
-  local lines = {}
-  for _, f in ipairs(files) do
-    lines[#lines + 1] = f
-  end
-  vim.api.nvim_buf_set_lines(list_buf, 0, -1, false, lines)
-
-  vim.api.nvim_buf_set_keymap(list_buf, 'n', '<CR>', '', {
-    silent = true,
-    callback = function()
-      local line = vim.fn.getline('.')
-      if line and line ~= '' then
-        load_diff(line)
-      end
-    end,
-  })
-
-  vim.api.nvim_buf_set_keymap(list_buf, 'n', 'q', '', {
-    silent = true,
-    callback = function()
-      vim.api.nvim_win_close(list_win, true)
-    end,
-  })
-
-  vim.api.nvim_set_current_win(diff_left)
-  vim.cmd('wincmd =')
+  require('contuts.review').open(build)
 end, { desc = 'Review the last build result side by side' })
 
 vim.api.nvim_create_user_command('ContutsEvidence', function()
   require('contuts.evidence').open()
 end, { desc = 'View evidence claims from the last AI response' })
+
+vim.api.nvim_create_user_command('ContutsPlan', function()
+  if not ensure_tcp() then return end
+  local evidence = require('contuts.evidence')
+  evidence.open({
+    on_build = function(item)
+      local instruction = item.data.claim
+      local msg = string.format('Handle the issue at %s:%d [%s]:\n\n%s', item.data.file, item.data.line, item.data.severity or '', instruction)
+      local evidence_text = evidence.get_active_text()
+      if evidence_text and evidence_text ~= '' then
+        msg = msg .. '\n\n── Planning context (evidence and annotations) ──\n' .. evidence_text
+      end
+      vim.schedule(function()
+        M.send({ type = 'plan_build', content = msg }, function(result)
+          if result.type == 'error' then
+            vim.notify('contuts plan build error: ' .. result.content, vim.log.levels.ERROR)
+            evidence.set_proposal_state('rejected')
+          end
+        end)
+      end)
+    end,
+    on_build_all = function()
+      local msg = 'Please implement the changes we discussed'
+      local evidence_text = evidence.get_active_text()
+      if evidence_text and evidence_text ~= '' then
+        msg = msg .. '\n\n── Planning context (evidence and annotations) ──\n' .. evidence_text
+      end
+      vim.schedule(function()
+        M.send({ type = 'build', content = msg, repoPath = vim.fn.getcwd() }, function(result)
+          if result.type == 'build_result' then
+            vim.notify(string.format('contuts: build complete — %d files, +%d/-%d lines',
+              #result.files, result.insertions, result.deletions), vim.log.levels.INFO)
+          elseif result.type == 'error' then
+            vim.notify('contuts build error: ' .. result.content, vim.log.levels.ERROR)
+          end
+        end)
+      end)
+    end,
+    on_accept = function(item)
+      vim.schedule(function()
+        M.send({ type = 'plan_accept' }, function(result)
+          if result.type == 'error' then
+            vim.notify('contuts accept error: ' .. result.content, vim.log.levels.ERROR)
+          end
+        end)
+      end)
+    end,
+    on_reject = function(item)
+      vim.schedule(function()
+        M.send({ type = 'plan_reject' }, function(result)
+          if result.type == 'error' then
+            vim.notify('contuts reject error: ' .. result.content, vim.log.levels.ERROR)
+          end
+        end)
+      end)
+    end,
+  })
+end, { desc = 'Interactive plan — browse evidence, annotate, build by item (b) or all (B)' })
+
+vim.api.nvim_create_user_command('ContutsPlanReview', function()
+  require('contuts.planreview').open(last_build)
+end, { desc = 'View evidence with annotations and build summary' })
 
 vim.api.nvim_create_user_command('ContutsMerge', function()
   if not ensure_tcp() then return end
