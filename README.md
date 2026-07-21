@@ -2,8 +2,6 @@
 
 **Currently Neovim-only. More editors coming soon.**
 
-# Agent Development Engine
-
 An editor-agnostic engine for human-controlled AI software development. Agents implement code, static analysis verifies reality, and interactive context magnifies the developer's understanding before changes are accepted.
 
 # Every AI answer should become interactive.
