@@ -18,6 +18,14 @@ contuts flips the default: AI works in isolated git worktrees, never touching yo
 
 No auto-merge. No blind trust. You see everything before it lands.
 
+### Why contuts exists
+
+The current paradigm is generate → accept. AI writes, humans rubber-stamp. That's not collaboration, it's delegation with extra steps.
+
+contuts was built on a different belief: **planning is inherently interactive.** An AI that reads your code and comes back with answers should also come back with evidence — specific file paths, line numbers, severity levels — so you can verify each claim without leaving your editor. Static analysis tools and runtime information should be woven into that evidence to validate or challenge what the AI says. Every claim should be clickable, navigable, and refutable.
+
+This is what we mean by **building human context** — reducing the distance between "the AI said something" and "I understand it well enough to agree or disagree." The faster you can build that context, the faster you can make real decisions. Not rubber-stamps, decisions.
+
 ---
 
 ## How It Works
