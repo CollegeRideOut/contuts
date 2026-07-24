@@ -11,11 +11,10 @@ interface Message {
   diffStat?: string
   files?: string[]
   proposalId?: string
-}
-
-interface ReadyMessage {
-  ready: true
-  port: number
+  extractEvidence?: boolean
+  generateTasks?: boolean
+  taskContext?: string
+  intention?: string
 }
 
 interface BuildResult {
@@ -28,67 +27,31 @@ interface BuildResult {
   deletions: number
   log: string
   diffStat: string
+  intention?: string
 }
-console.log("test numero 4 of contuts")
-console.log("klk test numero 5 of contuts")
+
+interface ReadyMessage {
+  ready: true
+  port: number
+}
 
 const repoPath = process.cwd()
-let worktreePath: string | null = null
-let worktreeBranch: string | null = null
-let worktreeBaseRef: string | null = null
 let isBuilding = false
 let chatSessionID: string | null = null
 let buildTaskId: string | null = null
-let defaultBranch: string | null = null
+let preBuildHead: string | null = null
 let pendingProposal: { stashed: boolean } | null = null
 
-function detectDefaultBranch(cwd: string): string {
-  if (defaultBranch) return defaultBranch
+function getCurrentBranch(): string {
   try {
-    defaultBranch = execSync(
-      `git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null || git rev-parse --abbrev-ref HEAD`,
-      { cwd, encoding: 'utf-8' }
-    ).trim().replace('refs/remotes/origin/', '')
+    return execSync('git rev-parse --abbrev-ref HEAD', { cwd: repoPath, encoding: 'utf-8' }).trim()
   } catch {
-    defaultBranch = 'main'
+    return 'HEAD'
   }
-  return defaultBranch
 }
 
-function ensureWorktree(cwd: string): void {
-  if (worktreePath) return
-  const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
-  worktreeBranch = `agent/contuts-${id}`
-  worktreePath = path.join(path.dirname(cwd), `contuts-${id}`)
-
-  try {
-    execSync('git rev-parse HEAD', { cwd, stdio: 'pipe' })
-  } catch {
-    execSync('git commit --allow-empty -m "contuts: root"', { cwd, stdio: 'pipe' })
-  }
-
-  worktreeBaseRef = execSync('git rev-parse HEAD', { cwd, encoding: 'utf-8' }).trim()
-  execSync(`git worktree add -b ${worktreeBranch} ${worktreePath} HEAD`, { cwd, stdio: 'pipe' })
-}
-
-function cleanupWorktree(): void {
-  if (!worktreePath || !worktreeBranch) return
-  try {
-    execSync(`git worktree remove ${worktreePath}`, { cwd: repoPath, stdio: 'pipe' })
-  } catch { }
-  try {
-    execSync(`git branch -D ${worktreeBranch}`, { cwd: repoPath, stdio: 'pipe' })
-  } catch { }
-  worktreePath = null
-  worktreeBranch = null
-}
-
-function chmodRepo(cwd: string, readonly: boolean): void {
-  const mode = readonly ? 'a-w' : 'u+w'
-  execSync(
-    `find ${cwd} -path '${cwd}/.git' -prune -o -type f -exec chmod ${mode} {} +`,
-    { stdio: 'pipe' }
-  )
+function saveHead(): string {
+  return execSync('git rev-parse HEAD', { cwd: repoPath, encoding: 'utf-8' }).trim()
 }
 
 function sendMessage(socket: net.Socket, msg: Message): void {
@@ -99,21 +62,20 @@ function generateTaskId(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
 }
 
-function collectBuildResult(socket: net.Socket, cwd?: string): void {
-  const repo = cwd || repoPath
-  const base = worktreeBaseRef || detectDefaultBranch(repo)
-  if (!worktreeBranch || !buildTaskId) {
+function collectBuildResult(socket: net.Socket, intention?: string): void {
+  if (!buildTaskId) {
     sendMessage(socket, { type: 'error', content: 'No build to collect results from' })
     isBuilding = false
     return
   }
 
   try {
-    const branch = worktreeBranch
+    const head = preBuildHead || saveHead()
+    const currentBranch = getCurrentBranch()
 
-    const diffStat = execSync(`git diff ${base}...${branch} --stat`, { cwd: repo, encoding: 'utf-8' }).trim()
-    const numstat = execSync(`git diff ${base}...${branch} --numstat`, { cwd: repo, encoding: 'utf-8' }).trim()
-    const log = execSync(`git log ${base}..${branch} --oneline`, { cwd: repo, encoding: 'utf-8' }).trim()
+    const diffStat = execSync(`git diff ${head}..HEAD --stat`, { cwd: repoPath, encoding: 'utf-8' }).trim()
+    const numstat = execSync(`git diff ${head}..HEAD --numstat`, { cwd: repoPath, encoding: 'utf-8' }).trim()
+    const log = execSync(`git log ${head}..HEAD --oneline`, { cwd: repoPath, encoding: 'utf-8' }).trim()
 
     const files: string[] = []
     let insertions = 0
@@ -132,13 +94,14 @@ function collectBuildResult(socket: net.Socket, cwd?: string): void {
     const result: BuildResult = {
       type: 'build_result',
       taskId: buildTaskId,
-      branch,
-      baseBranch: base,
+      branch: currentBranch,
+      baseBranch: head,
       files,
       insertions,
       deletions,
       log,
       diffStat,
+      intention,
     }
 
     sendMessage(socket, result)
@@ -151,21 +114,31 @@ function collectBuildResult(socket: net.Socket, cwd?: string): void {
   isBuilding = false
 }
 
-function handlePrompt(socket: net.Socket, content: string): void {
-  const cwd = repoPath
-  ensureWorktree(cwd)
-  sendMessage(socket, { type: 'build_status', content: `Branch: ${worktreeBranch}` })
+function handlePrompt(socket: net.Socket, content: string, extractEvidence?: boolean, generateTasks?: boolean, taskContext?: string): void {
+  sendMessage(socket, { type: 'build_status', content: 'Running opencode (plan mode)...' })
 
-  execSync('git checkout -f HEAD', { cwd: worktreePath!, stdio: 'pipe' })
-  chmodRepo(worktreePath!, true)
+  let prompt: string
 
-  const evidenceInstruction = `
+  if (taskContext) {
+    prompt = `[SYSTEM: CHAT MODE] You are in a discussion about a specific task. Stay focused on the task context.\n\n${taskContext}\n\nUser: ${content}`
+  } else {
+    prompt = `[SYSTEM: PLAN MODE] You are in plan mode. You may read files for context, but you MUST NOT create, edit, or delete any files. Only discuss and analyze.\n\n${content}`
+  }
+
+  if (extractEvidence) {
+    prompt += `
+
 [SYSTEM: EVIDENCE] At the end of your response, if you reference specific code locations, include an <evidence> tag with a JSON array of claims. Each claim must have: file (relative path), line (1-based number), claim (short phrase), detail (full explanation sentence), severity (one of: error, warning, info). Example: <evidence>[{"file":"src/main.ts","line":42,"claim":"Unhandled promise rejection","detail":"The async function lacks a .catch() handler.","severity":"error"}]</evidence> If you don't reference any code, output <evidence></evidence>.`
+  }
 
-  const prompt = `[SYSTEM: PLAN MODE] You are in plan mode. You may read files for context, but you MUST NOT create, edit, or delete any files. Only discuss and analyze.\n\n${content}${evidenceInstruction}`
+  if (generateTasks) {
+    prompt += `
+
+[SYSTEM: TASKS] At the end of your response, include an <evidence> tag with a JSON array of tasks. Each task must have: file (relative path), line (1-based number), claim (short task description), detail (full explanation), severity set to "task". Example: <evidence>[{"file":"src/main.ts","line":42,"claim":"Add input validation","detail":"The endpoint needs validation for user input.","severity":"task"}]</evidence> If there are no tasks, output <evidence></evidence>.`
+  }
 
   const proc = spawn('opencode', ['run', '--format', 'json', prompt], {
-    cwd: worktreePath!,
+    cwd: repoPath,
     env: { ...process.env },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -198,7 +171,6 @@ function handlePrompt(socket: net.Socket, content: string): void {
 
   proc.on('close', () => {
     clearInterval(heartbeat)
-    chmodRepo(worktreePath!, false)
 
     const evidenceMatch = responseText.match(/<evidence>([\s\S]*?)<\/evidence>/)
     if (evidenceMatch) {
@@ -216,13 +188,11 @@ function handlePrompt(socket: net.Socket, content: string): void {
 
   proc.on('error', () => {
     clearInterval(heartbeat)
-    chmodRepo(worktreePath!, false)
     sendMessage(socket, { type: 'error', content: 'Failed to run opencode' })
   })
 }
 
-function handleBuild(socket: net.Socket, content: string, buildRepoPath?: string): void {
-  const cwd = buildRepoPath || repoPath
+function handleBuild(socket: net.Socket, content: string): void {
   if (isBuilding) {
     sendMessage(socket, { type: 'error', content: 'Build already in progress' })
     return
@@ -230,23 +200,24 @@ function handleBuild(socket: net.Socket, content: string, buildRepoPath?: string
 
   isBuilding = true
   buildTaskId = generateTaskId()
-  ensureWorktree(cwd)
+  preBuildHead = saveHead()
+
+  let stashed = false
+  try {
+    execSync('git stash push -m "contuts: pre-build"', { cwd: repoPath, stdio: 'pipe' })
+    stashed = true
+  } catch { }
 
   sendMessage(socket, { type: 'mode_change', mode: 'build' })
-  sendMessage(socket, { type: 'build_status', content: `Branch: ${worktreeBranch}` })
   sendMessage(socket, { type: 'build_status', content: 'Running opencode...' })
 
-  chmodRepo(worktreePath!, false)
-
-  const buildPrompt = `[SYSTEM: BUILD MODE] You are in build mode. You have full write permissions in the worktree.\n\n${content}`
+  const buildPrompt = `[SYSTEM: BUILD MODE] You are in build mode. You have full write permissions.\n\n${content}`
   const buildArgs = ['run', '--format', 'json', '--auto']
-  if (chatSessionID) {
-    buildArgs.push('--session', chatSessionID)
-  }
+  if (chatSessionID) buildArgs.push('--session', chatSessionID)
   buildArgs.push(buildPrompt)
 
   const proc = spawn('opencode', buildArgs, {
-    cwd: worktreePath!,
+    cwd: repoPath,
     env: { ...process.env },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -254,6 +225,7 @@ function handleBuild(socket: net.Socket, content: string, buildRepoPath?: string
   const STALE_TIMEOUT = 5 * 60 * 1000
   const timer = setTimeout(() => {
     proc.kill('SIGTERM')
+    if (stashed) { try { execSync('git stash pop', { cwd: repoPath, stdio: 'pipe' }) } catch { } }
     sendMessage(socket, { type: 'error', content: 'Build timed out after 5 minutes' })
     sendMessage(socket, { type: 'mode_change', mode: 'plan' })
     isBuilding = false
@@ -261,6 +233,7 @@ function handleBuild(socket: net.Socket, content: string, buildRepoPath?: string
 
   let stderrBuf = ''
   let stdoutBuf = ''
+  let intentionText = ''
   let lastActivity = Date.now()
 
   const heartbeat = setInterval(() => {
@@ -280,6 +253,7 @@ function handleBuild(socket: net.Socket, content: string, buildRepoPath?: string
       try {
         const event = JSON.parse(trimmed)
         if (event.type === 'text' && event.part?.text) {
+          intentionText += event.part.text
           sendMessage(socket, { type: 'build_status', content: event.part.text })
         }
         if (event.type === 'tool_use' && event.part?.tool) {
@@ -304,97 +278,50 @@ function handleBuild(socket: net.Socket, content: string, buildRepoPath?: string
     }
     sendMessage(socket, { type: 'build_status', content: 'Committing changes...' })
     try {
-      execSync('git add -A', { cwd: worktreePath!, stdio: 'pipe' })
-      execSync('git commit -m "contuts: build task"', { cwd: worktreePath!, stdio: 'pipe' })
+      execSync('git add -A', { cwd: repoPath, stdio: 'pipe' })
+      execSync('git commit -m "contuts: build task"', { cwd: repoPath, stdio: 'pipe' })
+      if (stashed) { try { execSync('git stash pop', { cwd: repoPath, stdio: 'pipe' }); stashed = false } catch { } }
+      execSync('git checkout HEAD -- .', { cwd: repoPath, stdio: 'pipe' })
       sendMessage(socket, { type: 'build_status', content: 'Changes committed.' })
     } catch {
+      if (stashed) { try { execSync('git stash pop', { cwd: repoPath, stdio: 'pipe' }); stashed = false } catch { } }
+      execSync('git checkout HEAD -- .', { cwd: repoPath, stdio: 'pipe' })
       sendMessage(socket, { type: 'build_status', content: 'Nothing to commit (no changes made).' })
     }
-    collectBuildResult(socket, cwd)
+    collectBuildResult(socket, intentionText.trim())
   })
 
   proc.on('error', (err) => {
     clearTimeout(timer)
     clearInterval(heartbeat)
+    if (stashed) { try { execSync('git stash pop', { cwd: repoPath, stdio: 'pipe' }) } catch { } }
     sendMessage(socket, { type: 'error', content: `opencode failed: ${err.message}` })
     sendMessage(socket, { type: 'mode_change', mode: 'plan' })
     isBuilding = false
   })
 }
 
-function handleMerge(socket: net.Socket): void {
-  if (!worktreeBranch || !worktreePath) {
-    sendMessage(socket, { type: 'error', content: 'No build to merge' })
-    return
-  }
 
-  try {
-    const branch = worktreeBranch
-
-    let stashed = false
-    try {
-      execSync('git stash', { cwd: repoPath, stdio: 'pipe' })
-      stashed = true
-    } catch { }
-
-    try {
-      execSync(`git merge --squash ${branch}`, { cwd: repoPath, stdio: 'pipe' })
-      execSync(`git commit -m "contuts: merge ${branch}"`, { cwd: repoPath, stdio: 'pipe' })
-    } finally {
-      if (stashed) {
-        execSync('git stash pop', { cwd: repoPath, stdio: 'pipe' })
-      }
-    }
-
-    cleanupWorktree()
-    const base = detectDefaultBranch(repoPath)
-    sendMessage(socket, { type: 'build_status', content: `Merged ${branch} into ${base}` })
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e)
-    sendMessage(socket, { type: 'error', content: `Merge failed: ${msg}` })
-  }
-}
-
-function handleDiscard(socket: net.Socket): void {
-  if (!worktreeBranch || !worktreePath) {
-    sendMessage(socket, { type: 'error', content: 'No build to discard' })
-    return
-  }
-
-  try {
-    const branch = worktreeBranch
-    sendMessage(socket, { type: 'build_status', content: `Discarded ${branch} and cleaned up worktree` })
-    cleanupWorktree()
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e)
-    sendMessage(socket, { type: 'error', content: `Discard failed: ${msg}` })
-  }
-}
 
 function handlePlanBuild(socket: net.Socket, content: string): void {
-  const cwd = repoPath
   if (isBuilding || pendingProposal) {
     sendMessage(socket, { type: 'error', content: 'A build or proposal is already in progress' })
     return
   }
 
-  ensureWorktree(cwd)
-  sendMessage(socket, { type: 'build_status', content: `Branch: ${worktreeBranch}` })
-  chmodRepo(worktreePath!, false)
-
   let stashed = false
   try {
-    execSync('git stash push -m "contuts: pre-proposal"', { cwd: worktreePath!, stdio: 'pipe' })
+    execSync('git stash push -m "contuts: pre-proposal"', { cwd: repoPath, stdio: 'pipe' })
     stashed = true
   } catch { }
 
-  const buildPrompt = `[SYSTEM: BUILD MODE] You have full write permissions in the worktree. Make the following targeted change. Do NOT write any commentary — just implement the change and stop.\n\n${content}`
+  const buildPrompt = `[SYSTEM: BUILD MODE] You have full write permissions. Make the following targeted change. Do NOT write any commentary — just implement the change and stop.\n\n${content}`
   const buildArgs = ['run', '--format', 'json', '--auto']
   if (chatSessionID) buildArgs.push('--session', chatSessionID)
   buildArgs.push(buildPrompt)
 
   const proc = spawn('opencode', buildArgs, {
-    cwd: worktreePath!,
+    cwd: repoPath,
     env: { ...process.env },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -402,15 +329,14 @@ function handlePlanBuild(socket: net.Socket, content: string): void {
   const STALE_TIMEOUT = 3 * 60 * 1000
   const timer = setTimeout(() => {
     proc.kill('SIGTERM')
-    if (stashed) {
-      try { execSync('git stash pop', { cwd: worktreePath!, stdio: 'pipe' }) } catch { }
-    }
+    if (stashed) { try { execSync('git stash pop', { cwd: repoPath, stdio: 'pipe' }) } catch { } }
     pendingProposal = null
     sendMessage(socket, { type: 'error', content: 'Plan build timed out after 3 minutes' })
   }, STALE_TIMEOUT)
 
   let stderrBuf = ''
   let stdoutBuf = ''
+  let intentionText = ''
   let errored = false
 
   proc.stdout.on('data', (chunk: Buffer) => {
@@ -423,6 +349,7 @@ function handlePlanBuild(socket: net.Socket, content: string): void {
       try {
         const event = JSON.parse(trimmed)
         if (event.type === 'text' && event.part?.text) {
+          intentionText += event.part.text
           sendMessage(socket, { type: 'build_status', content: event.part.text })
         }
       } catch { }
@@ -441,18 +368,16 @@ function handlePlanBuild(socket: net.Socket, content: string): void {
     }
 
     try {
-      const diffOutput = execSync('git diff HEAD', { cwd: worktreePath!, encoding: 'utf-8' }).trim()
+      const diffOutput = execSync('git diff HEAD', { cwd: repoPath, encoding: 'utf-8' }).trim()
       if (!diffOutput) {
-        if (stashed) {
-          try { execSync('git stash pop', { cwd: worktreePath!, stdio: 'pipe' }); stashed = false } catch { }
-        }
+        if (stashed) { try { execSync('git stash pop', { cwd: repoPath, stdio: 'pipe' }); stashed = false } catch { } }
         pendingProposal = null
         sendMessage(socket, { type: 'plan_proposal', diff: '', files: [] })
         return
       }
 
-      const diffStat = execSync('git diff HEAD --stat', { cwd: worktreePath!, encoding: 'utf-8' }).trim()
-      const numstat = execSync('git diff HEAD --numstat', { cwd: worktreePath!, encoding: 'utf-8' }).trim()
+      const diffStat = execSync('git diff HEAD --stat', { cwd: repoPath, encoding: 'utf-8' }).trim()
+      const numstat = execSync('git diff HEAD --numstat', { cwd: repoPath, encoding: 'utf-8' }).trim()
       const files: string[] = []
       for (const line of numstat.split('\n')) {
         if (!line.trim()) continue
@@ -461,16 +386,9 @@ function handlePlanBuild(socket: net.Socket, content: string): void {
       }
 
       pendingProposal = { stashed }
-      sendMessage(socket, {
-        type: 'plan_proposal',
-        diff: diffOutput,
-        diffStat,
-        files,
-      })
+      sendMessage(socket, { type: 'plan_proposal', diff: diffOutput, diffStat, files, intention: intentionText.trim() })
     } catch (e: unknown) {
-      if (stashed) {
-        try { execSync('git stash pop', { cwd: worktreePath!, stdio: 'pipe' }); stashed = false } catch { }
-      }
+      if (stashed) { try { execSync('git stash pop', { cwd: repoPath, stdio: 'pipe' }); stashed = false } catch { } }
       pendingProposal = null
       const msg = e instanceof Error ? e.message : String(e)
       sendMessage(socket, { type: 'error', content: `Proposal failed: ${msg}` })
@@ -480,9 +398,7 @@ function handlePlanBuild(socket: net.Socket, content: string): void {
   proc.on('error', (err) => {
     clearTimeout(timer)
     errored = true
-    if (stashed) {
-      try { execSync('git stash pop', { cwd: worktreePath!, stdio: 'pipe' }) } catch { }
-    }
+    if (stashed) { try { execSync('git stash pop', { cwd: repoPath, stdio: 'pipe' }) } catch { } }
     pendingProposal = null
     sendMessage(socket, { type: 'error', content: `opencode failed: ${err.message}` })
   })
@@ -496,11 +412,10 @@ function handlePlanAccept(socket: net.Socket): void {
 
   try {
     const stashed = pendingProposal.stashed
-    execSync('git add -A', { cwd: worktreePath!, stdio: 'pipe' })
-    execSync('git commit -m "contuts: plan proposal"', { cwd: worktreePath!, stdio: 'pipe' })
-    if (stashed) {
-      try { execSync('git stash pop', { cwd: worktreePath!, stdio: 'pipe' }) } catch { }
-    }
+    execSync('git add -A', { cwd: repoPath, stdio: 'pipe' })
+    execSync('git commit -m "contuts: plan proposal"', { cwd: repoPath, stdio: 'pipe' })
+    if (stashed) { try { execSync('git stash pop', { cwd: repoPath, stdio: 'pipe' }) } catch { } }
+    execSync('git checkout HEAD -- .', { cwd: repoPath, stdio: 'pipe' })
     pendingProposal = null
     sendMessage(socket, { type: 'plan_accepted' })
   } catch (e: unknown) {
@@ -517,11 +432,9 @@ function handlePlanReject(socket: net.Socket): void {
 
   try {
     const stashed = pendingProposal.stashed
-    execSync('git checkout HEAD -- .', { cwd: worktreePath!, stdio: 'pipe' })
-    try { execSync('git clean -fd', { cwd: worktreePath!, stdio: 'pipe' }) } catch { }
-    if (stashed) {
-      try { execSync('git stash pop', { cwd: worktreePath!, stdio: 'pipe' }) } catch { }
-    }
+    execSync('git checkout HEAD -- .', { cwd: repoPath, stdio: 'pipe' })
+    try { execSync('git clean -fd', { cwd: repoPath, stdio: 'pipe' }) } catch { }
+    if (stashed) { try { execSync('git stash pop', { cwd: repoPath, stdio: 'pipe' }) } catch { } }
     pendingProposal = null
     sendMessage(socket, { type: 'plan_rejected' })
   } catch (e: unknown) {
@@ -533,10 +446,10 @@ function handlePlanReject(socket: net.Socket): void {
 function handleMessage(socket: net.Socket, msg: Message): void {
   switch (msg.type) {
     case 'prompt':
-      handlePrompt(socket, msg.content ?? '')
+      handlePrompt(socket, msg.content ?? '', msg.extractEvidence, msg.generateTasks, msg.taskContext)
       break
     case 'build':
-      handleBuild(socket, msg.content ?? '', msg.repoPath)
+      handleBuild(socket, msg.content ?? '')
       break
     case 'plan_build':
       handlePlanBuild(socket, msg.content ?? '')
@@ -548,26 +461,18 @@ function handleMessage(socket: net.Socket, msg: Message): void {
       handlePlanReject(socket)
       break
     case 'build_merge':
-      handleMerge(socket)
+      sendMessage(socket, { type: 'error', content: 'Merge not needed — builds commit directly to your branch' })
       break
     case 'build_discard':
-      handleDiscard(socket)
+      sendMessage(socket, { type: 'error', content: 'Discard not needed — use git reset to undo commits' })
       break
     case 'shutdown':
-      cleanupWorktree()
       socket.end()
       break
     default:
       sendMessage(socket, { type: 'error', content: `Unknown type: ${msg.type}` })
   }
 }
-
-process.on('exit', () => {
-  cleanupWorktree()
-})
-process.on('SIGINT', () => { cleanupWorktree(); process.exit(2) })
-process.on('SIGTERM', () => { cleanupWorktree(); process.exit(15) })
-process.on('uncaughtException', () => { cleanupWorktree(); process.exit(1) })
 
 const server = net.createServer((socket: net.Socket) => {
   let buffer = ''
