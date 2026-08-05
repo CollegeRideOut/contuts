@@ -39,7 +39,9 @@ local function on_data(_, data, event)
           vim.notify('contuts: ' .. #(msg.items or {}) .. ' claims/tasks received', vim.log.levels.INFO)
         end
         if msg.type == 'plan_proposal' then
-          require('contuts.plan').set_proposal_state('proposed', { diff = msg.diff or '', files = msg.files or {}, diffStat = msg.diffStat or '', intention = msg.intention or '' })
+          require('contuts.plan').set_proposal_state('proposed',
+            { diff = msg.diff or '', files = msg.files or {}, diffStat = msg.diffStat or '', intention = msg.intention or
+            '' })
         elseif msg.type == 'plan_accepted' then
           require('contuts.plan').set_proposal_state('accepted')
         elseif msg.type == 'plan_rejected' then
@@ -179,7 +181,8 @@ local function add_item_from_selection(item_type, opts)
     detail = desc,
     chat = {},
   })
-  vim.notify(string.format('contuts: %s added at %s:%d', item_type, file, start_line or vim.fn.line('.')), vim.log.levels.INFO)
+  vim.notify(string.format('contuts: %s added at %s:%d', item_type, file, start_line or vim.fn.line('.')),
+    vim.log.levels.INFO)
 end
 
 vim.api.nvim_create_user_command('ContutsAddClaim', function(opts)
@@ -222,9 +225,35 @@ vim.api.nvim_create_user_command('ContutsReview', function()
   require('contuts.review').open(build)
 end, { desc = 'Review the last build result side by side' })
 
+vim.api.nvim_create_user_command('ContutsDiff', function(opts)
+  require('contuts.diff').open(vim.trim(opts.args or ''))
+end,
+  { nargs = '*', desc =
+  'Walk a git diff on the real working tree — ]/[ step, J/K file, g/G first/last, o open, q quit (restores original)' })
+
+vim.api.nvim_create_user_command('ContutsDiffRestore', function()
+  require('contuts.diff').restore_command()
+end, { desc = 'Restore the original working tree state from the last diff walk session' })
+
 vim.api.nvim_create_user_command('ContutsEvidence', function()
   require('contuts.plan').open()
 end, { desc = 'View claims and tasks (plan view)' })
+
+vim.api.nvim_create_user_command('ContutsDiff', function(opts)
+  local args = opts.args
+  local lines = false
+  args = vim.trim(args:gsub('%-%-lines', function()
+    lines = true
+    return ''
+  end))
+  require('contuts.diff').open(args, { lines = lines })
+end,
+  { nargs = '*', desc =
+  'Walk a git diff on the real working tree — ]/[ step, J/K file, g/G first/last, o open, q quit (restores original). --lines walks every changed line' })
+
+vim.api.nvim_create_user_command('ContutsDiffRestore', function()
+  require('contuts.diff').restore_command()
+end, { desc = 'Restore the original working tree state from the last diff walk session' })
 
 vim.api.nvim_create_user_command('ContutsPlan', function()
   if not ensure_tcp() then return end
@@ -294,11 +323,14 @@ vim.api.nvim_create_user_command('ContutsPlanReview', function()
 end, { desc = 'View evidence with annotations and build summary' })
 
 vim.api.nvim_create_user_command('ContutsMerge', function()
-  vim.notify('contuts: builds commit directly — no merge needed. Use :ContutsReview to see changes, or git log to review commits.', vim.log.levels.INFO)
+  vim.notify(
+  'contuts: builds commit directly — no merge needed. Use :ContutsReview to see changes, or git log to review commits.',
+    vim.log.levels.INFO)
 end, { desc = 'Not needed — builds commit directly to your branch' })
 
 vim.api.nvim_create_user_command('ContutsDiscard', function()
-  vim.notify('contuts: builds commit directly — use git reset --soft HEAD~1 to undo the last build commit.', vim.log.levels.INFO)
+  vim.notify('contuts: builds commit directly — use git reset --soft HEAD~1 to undo the last build commit.',
+    vim.log.levels.INFO)
 end, { desc = 'Not needed — use git reset to undo commits' })
 
 vim.api.nvim_create_user_command('ContutsRestart', function()

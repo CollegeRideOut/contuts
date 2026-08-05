@@ -24,6 +24,8 @@ No worktree. No merge step. Just task-by-task iteration with the AI.
 | `:ContutsAddClaim` | Visual select code, then add an observation (claim) pinned to that file and line. |
 | `:ContutsAddTask` | Same, but adds a buildable work item (task). |
 | `:ContutsPlan` | Open the plan view — a split tab with your code on top, claim/task list below. |
+| `:ContutsDiff [git-diff-args]` | Step through a git diff — e.g. `:ContutsDiff HEAD~1` or `:ContutsDiff --cached`. Works on worktree changes, the index, any commit (`<rev>`), and stash entries (`stash@{0}`). Add `--lines` to walk every changed line as its own step instead of whole hunks. |
+| `:ContutsDiffRestore` | Restore your working tree after a crash or interrupted session (reads the saved session from disk). |
 | `:ContutsRestart` | Restart the Node.js server. |
 | `<Leader>ce` | Show claim/task detail for the line under cursor. |
 
@@ -51,6 +53,27 @@ No worktree. No merge step. Just task-by-task iteration with the AI.
 5. **Build** — `b` on a task. AI writes code, you see `[P]`. Press `v` to see the diff and the AI's intention.
 6. **Accept / reject** — `y` commits to your branch. `n` rolls it back. The file on disk matches immediately.
 7. **Next** — Pick another task, repeat.
+
+### Diff review keymaps (`:ContutsDiff`)
+
+You watch the **actual file** change — this is a patch walker, not a scratch-buffer diff view. When you open a diff, the working tree is rewound to the diff's base state, then every step applies one hunk with `git apply` directly to your real files. Neovim simply reloads the real buffer, so LSP, treesitter, and any plugin that reads files just work.
+
+Each hunk is **previewed first**: the cursor jumps to the exact line where the hunk will insert or delete, so you see the before-state — the statusline shows `[preview]` with a `→ delete … / → add …` marker on the target line. Only pressing `j` applies it (and half-steps to the next hunk's preview). The walk is fully reversible (`git apply -R` per hunk). Pressing `q` restores your tree to its exact pre-walk state, including the index. Every session is backed up to disk (`/tmp/contuts/`), and `:ContutsDiffRestore` recovers your tree after a crash.
+
+| Key | Action |
+|---|---|
+| `]` / `<CR>` / `n` | Apply previewed hunk, half-step to next preview |
+| `[` / `p` | Undo previous hunk, half-step back to its preview |
+| `J` / `K` | Jump to next / previous file |
+| `g` / `G` | First hunk / apply everything (`[done]`) |
+| `o` | Open the real file in a new tab at the previewed hunk |
+| `q` | Restore the tree and close |
+
+`j` / `k` are left untouched — you can roam the code freely between hunks, then press `]` to apply the previewed hunk. With `]` / `[` bound to step, `J` / `K` still jump between files.
+
+By default each step is a whole hunk. Pass `--lines` (`:ContutsDiff --lines`) to step through the diff **one changed line at a time** — each add or delete is its own step, with the statusline naming the exact line (`→ add foo` / `→ delete bar`). Whole-file creates, binary and mode-only changes stay single steps.
+
+What you can walk: unstaged worktree changes, staged changes (`--cached`), a commit diff (`HEAD`, `HEAD~1` …), or a stash (`stash@{0}`). Binaries are applied as single binary steps; mode-only changes are single steps too.
 
 ---
 
